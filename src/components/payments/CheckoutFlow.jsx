@@ -1,16 +1,27 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth.js';
 import StripeCardForm from './StripeCardForm.jsx';
 import { Confetti } from '../common/Confetti.jsx';
 
 const PLANS = [
-  { label: 'Básico',  price: '$9.99',  value: 'basico', features: ['Acceso a recursos', 'Lecciones guiadas', 'Comunidad privada'] },
-  { label: 'Pro',     price: '$24.99', value: 'pro',    features: ['Feedback de IA', 'Clases 1:1', 'Partituras exclusivas'] },
-  { label: 'Master',  price: '$49.99', value: 'master', features: ['Plan personalizado', 'Sesiones premium', 'Análisis avanzado'] },
+  { label: 'Básico', price: '$9.99', value: 'basico', features: ['Acceso a recursos', 'Lecciones guiadas', 'Comunidad privada'] },
+  { label: 'Pro', price: '$24.99', value: 'pro', features: ['Feedback de IA', 'Clases 1:1', 'Partituras exclusivas'] },
+  { label: 'Master', price: '$49.99', value: 'master', features: ['Plan personalizado', 'Sesiones premium', 'Análisis avanzado'] },
 ];
 
 const STORAGE_KEY = 'checkout_plan';
+
+const normalizePlan = (candidate) => (
+  PLANS.find((plan) => plan.value === candidate || plan.label === candidate)?.value || null
+);
+
+const readStoredPlan = () => {
+  const savedPlan = sessionStorage.getItem(STORAGE_KEY);
+  const normalizedPlan = normalizePlan(savedPlan);
+  if (savedPlan && !normalizedPlan) sessionStorage.removeItem(STORAGE_KEY);
+  return normalizedPlan;
+};
 
 const SecureBadge = () => (
   <p className="checkout-secure">
@@ -25,27 +36,26 @@ const SecureBadge = () => (
 export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => {
   const { user } = useAuth();
   const navigate = useNavigate();
-
-  const [step, setStep] = useState(() => {
-    const saved = sessionStorage.getItem(STORAGE_KEY);
-    if (saved) return 'review';
-    if (initialPlan) return 'review';
-    return 'select_plan';
-  });
-  const [selectedPlan, setSelectedPlan] = useState(() => {
-    return initialPlan || sessionStorage.getItem(STORAGE_KEY) || null;
-  });
+  const initialSelection = normalizePlan(initialPlan) || readStoredPlan();
+  const [step, setStep] = useState(() => (initialSelection ? 'review' : 'select_plan'));
+  const [selectedPlan, setSelectedPlan] = useState(initialSelection);
   const [succeeded, setSucceeded] = useState(false);
 
   useEffect(() => {
-    if (selectedPlan) {
-      sessionStorage.setItem(STORAGE_KEY, selectedPlan);
-    } else {
-      sessionStorage.removeItem(STORAGE_KEY);
-    }
+    if (selectedPlan) sessionStorage.setItem(STORAGE_KEY, selectedPlan);
+    else sessionStorage.removeItem(STORAGE_KEY);
   }, [selectedPlan]);
 
-  const planData = PLANS.find((p) => p.label === selectedPlan || p.value === selectedPlan);
+  const planData = PLANS.find((plan) => plan.value === selectedPlan);
+
+  const ensureAuthenticated = () => {
+    if (user) return true;
+    if (planData) sessionStorage.setItem(STORAGE_KEY, planData.value);
+    sessionStorage.setItem('checkout_resume', '1');
+    const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
+    navigate(`/auth/login?returnTo=${returnTo}`);
+    return false;
+  };
 
   if (succeeded && planData) {
     return (
@@ -60,7 +70,6 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
     );
   }
 
-  // Step 1: select_plan
   if (step === 'select_plan') {
     return (
       <div className="checkout-step">
@@ -74,7 +83,8 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
               key={plan.value}
               type="button"
               className={`checkout-plan-card ${selectedPlan === plan.value ? 'active' : ''}`}
-              onClick={() => { setSelectedPlan(plan.value); }}
+              aria-pressed={selectedPlan === plan.value}
+              onClick={() => setSelectedPlan(plan.value)}
             >
               <strong>{plan.label}</strong>
               <span className="checkout-price">{plan.price}</span>
@@ -82,15 +92,11 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
           ))}
         </div>
         <button
+          type="button"
           className="button button-primary button-block"
           disabled={!selectedPlan}
           onClick={() => {
-            if (!user) {
-              sessionStorage.setItem('checkout_resume', '1');
-              const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
-              navigate(`/auth/login?returnTo=${returnTo}`);
-              return;
-            }
+            if (!ensureAuthenticated()) return;
             setStep('review');
           }}
         >
@@ -101,7 +107,6 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
     );
   }
 
-  // Step 2: review
   if (step === 'review' && planData) {
     return (
       <div className="checkout-step">
@@ -116,25 +121,30 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
           </div>
           <div className="plan-cost">{planData.price}</div>
         </div>
-        {planData.features && (
-          <ul className="lp-plan" style={{ background: 'transparent', border: 'none', padding: 0, boxShadow: 'none', margin: '0 0 1rem' }}>
-            {planData.features.map((f) => (
-              <li key={f}><span className="lp-check" aria-hidden="true">✓</span>{f}</li>
-            ))}
-          </ul>
-        )}
+        <ul className="lp-plan" style={{ background: 'transparent', border: 'none', padding: 0, boxShadow: 'none', margin: '0 0 1rem' }}>
+          {planData.features.map((feature) => (
+            <li key={feature}><span className="lp-check" aria-hidden="true">✓</span>{feature}</li>
+          ))}
+        </ul>
         <div className="checkout-summary">
           <div className="checkout-summary-row">
             <span>Cuenta</span>
-            <span>{user?.email}</span>
+            <span>{user?.email || 'Sesión requerida'}</span>
           </div>
         </div>
         <div className="checkout-actions">
-          <button className="button button-secondary" onClick={() => setStep('select_plan')}>
+          <button type="button" className="button button-secondary" onClick={() => setStep('select_plan')}>
             Atrás
           </button>
-          <button className="button button-primary" onClick={() => setStep('payment_method')}>
-            Ir a pagar
+          <button
+            type="button"
+            className="button button-primary"
+            onClick={() => {
+              if (!ensureAuthenticated()) return;
+              setStep('payment_method');
+            }}
+          >
+            {user ? 'Ir a pagar' : 'Inicia sesión para pagar'}
           </button>
         </div>
         <SecureBadge />
@@ -142,10 +152,10 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
     );
   }
 
-  // Step 3: payment_method (tokenized securely by Stripe Elements)
   if (step === 'payment_method' && planData) {
     const handlePaymentSuccess = () => {
       sessionStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem('checkout_resume');
       setSucceeded(true);
       setTimeout(() => onComplete?.(), 2400);
     };
