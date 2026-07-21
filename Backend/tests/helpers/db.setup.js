@@ -24,6 +24,7 @@ export const setupTestDb = () => {
 
     try {
       await prisma.paymentEvent.deleteMany();
+      await prisma.subscription.deleteMany();
       await prisma.payment.deleteMany();
       await prisma.content.deleteMany();
       await prisma.siteStat.deleteMany();

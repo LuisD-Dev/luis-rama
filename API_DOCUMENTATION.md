@@ -245,6 +245,61 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ----
 
+**Payment persistence schema**
+
+All payment writes go through `Backend/services/paymentService.js` (`createPaymentIntent`, `markPaymentCompleted`, `recordPaymentEvent`). Controllers/routes must not write payment tables directly.
+
+### `payments`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | Int PK | |
+| `user_id` | Int FK → users | Indexed with `created_at` |
+| `plan_tier` | String | `basico` \| `pro` \| `master` |
+| `amount` | Int | Amount in cents |
+| `currency` | String | Default `usd` |
+| `status` | String | `pending` \| `completed` \| `failed` \| `canceled` |
+| `provider` | String | Default `stripe` |
+| `external_id` | String? | Provider payment/session id |
+| `idempotency_key` | String UNIQUE | Prevents duplicate intents |
+| `metadata` | String? | JSON blob |
+| `stripe_payment_intent_id` | String? UNIQUE | Stripe PI (legacy/elements path) |
+| `stripe_checkout_session_id` | String? UNIQUE | Stripe Checkout session |
+| `created_at` / `updated_at` | DateTime | |
+
+Indexes: unique `idempotency_key`; index `(user_id, created_at)`.
+
+### `subscriptions`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | Int PK | |
+| `user_id` | Int FK → users | |
+| `plan_tier` | String | |
+| `status` | String | `active` \| `canceled` \| `past_due` |
+| `provider` | String | Default `stripe` |
+| `external_id` | String | Unique with `provider` |
+| `current_period_start` / `current_period_end` | DateTime | |
+
+Created/activated inside `markPaymentCompleted` in the same transaction that sets payment `completed` and upgrades `users.plan_tier` / `role` to `premium`.
+
+### `payment_events`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | Int PK | |
+| `payment_id` | Int? FK → payments | |
+| `type` | String | e.g. `payment.completed`, Stripe event types |
+| `payload` | String | JSON |
+| `processed_at` | DateTime? | |
+| `idempotency_key` | String UNIQUE | Dedupes event processing |
+| `stripe_event_id` | String? UNIQUE | Stripe webhook event id |
+| `outcome` | String? | `processing` \| `processed` \| `duplicate` \| `failed` \| `ignored` |
+
+Migrations: forward `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`, reverse `.../down.sql` (also mirrored under `Backend/db/migrations/`).
+
+----
+
 Notes and mapping
 
 - The API endpoints in this documentation correspond to the server code under `Backend/routes`.

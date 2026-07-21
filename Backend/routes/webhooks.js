@@ -1,6 +1,12 @@
 import express from 'express';
 import crypto from 'crypto';
-import prisma from '../utils/prismaClient.js';
+import {
+  markPaymentCompleted,
+  recordPaymentEvent,
+  updatePaymentEventOutcome,
+  findPaymentForStripeWebhook,
+  PaymentNotFoundError,
+} from '../services/paymentService.js';
 
 const router = express.Router();
 
@@ -16,7 +22,9 @@ router.post('/stripe', async (req, res) => {
   }
 
   if (webhookSecret) {
-    const payload = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : JSON.stringify(rawBody);
+    const payload = Buffer.isBuffer(rawBody)
+      ? rawBody.toString('utf8')
+      : JSON.stringify(rawBody);
     const signatureHeader = String(sig);
     const parts = signatureHeader.split(',');
     const timestampPart = parts.find((part) => part.startsWith('t='));
@@ -30,17 +38,22 @@ router.post('/stripe', async (req, res) => {
     }
 
     const signedPayload = `${timestamp}.${payload}`;
-    const expected = crypto.createHmac('sha256', webhookSecret).update(signedPayload).digest('hex');
+    const expected = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(signedPayload)
+      .digest('hex');
     const signatureBuffer = Buffer.from(signature);
     const expectedBuffer = Buffer.from(expected);
 
-    if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) {
+    if (
+      signatureBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
+    ) {
       console.warn('Stripe webhook signature verification failed');
       return res.status(400).send('invalid signature');
     }
   }
 
-  // Minimal verification: use stripeEventId uniqueness and idempotent processing.
   try {
     let parsed = rawBody;
     if (Buffer.isBuffer(rawBody)) parsed = rawBody.toString('utf8');
@@ -55,79 +68,85 @@ router.post('/stripe', async (req, res) => {
       return res.status(200).send('ok');
     }
 
-    // Try to create a PaymentEvent record - unique constraint on stripeEventId prevents duplicates
-    try {
-      await prisma.paymentEvent.create({ data: {
-        stripeEventId,
-        eventType,
-        idempotencyKey,
-        payload: JSON.stringify(event),
-        outcome: 'processing',
-      }});
-    } catch (err) {
-      // Duplicate — already processed or in-flight
-      console.info({
-        stripeEventId,
-        eventType,
-        idempotencyKey,
-        outcome: 'duplicate',
-        timestamp: new Date().toISOString(),
-      }, 'duplicate webhook delivery');
-      return res.status(200).send('duplicate');
-    }
+    const { event: paymentEvent, created } = await recordPaymentEvent({
+      type: eventType || 'stripe.unknown',
+      payload: event,
+      idempotencyKey: `stripe:${stripeEventId}`,
+      stripeEventId,
+      outcome: 'processing',
+      processedAt: null,
+    });
 
-    if (eventType === 'payment_intent.succeeded') {
-      const paymentIntent = event.data?.object;
-      const stripeId = paymentIntent?.id;
-      const metadata = paymentIntent?.metadata || {};
-
-      // Find associated payment
-      const payment = await prisma.payment.findUnique({ where: { stripePaymentIntentId: stripeId } });
-      if (payment && payment.status === 'processed') {
-        await prisma.paymentEvent.updateMany({ where: { stripeEventId }, data: { outcome: 'duplicate', processedAt: new Date() } });
-        console.info({
-          userId: payment.userId,
-          paymentId: payment.id,
+    if (!created) {
+      console.info(
+        {
           stripeEventId,
           eventType,
           idempotencyKey,
           outcome: 'duplicate',
           timestamp: new Date().toISOString(),
-        }, 'duplicate webhook event for processed payment');
-        return res.status(200).send('ok');
-      }
+        },
+        'duplicate webhook delivery'
+      );
+      return res.status(200).send('duplicate');
+    }
+
+    if (eventType === 'payment_intent.succeeded') {
+      const stripeId = paymentIntent?.id;
+      const metadata = paymentIntent?.metadata || {};
+      const metaPaymentId =
+        parseInt(String(metadata?.paymentId || ''), 10) || null;
 
       try {
-        await prisma.$transaction(async (tx) => {
-          let p = payment;
-          if (!p) {
-            // Try to find by metadata paymentId
-            const metaPaymentId = parseInt(String(metadata?.paymentId || ''), 10) || null;
-            if (metaPaymentId) p = await tx.payment.findUnique({ where: { id: metaPaymentId } });
-          }
+        const payment = await findPaymentForStripeWebhook({
+          stripePaymentIntentId: stripeId,
+          paymentId: metaPaymentId,
+          idempotencyKey,
+        });
 
-          if (!p) {
-            await tx.paymentEvent.updateMany({ where: { stripeEventId }, data: { outcome: 'failed', processedAt: new Date() } });
-            return;
-          }
+        if (!payment) {
+          await updatePaymentEventOutcome(paymentEvent.id, {
+            outcome: 'failed',
+          });
+          return res.status(200).send('ok');
+        }
 
-          await tx.payment.update({ where: { id: p.id }, data: { status: 'processed' } });
-          await tx.user.update({ where: { id: p.userId }, data: { planTier: p.planTier } });
-          await tx.paymentEvent.updateMany({ where: { stripeEventId }, data: { paymentId: p.id, outcome: 'processed', processedAt: new Date() } });
-          console.info({
-            userId: p.userId,
-            paymentId: p.id,
+        const result = await markPaymentCompleted({
+          paymentId: payment.id,
+          subscriptionExternalId: stripeId || payment.externalId,
+          eventPayload: event,
+          eventIdempotencyKey: `payment.completed:${payment.id}:${stripeEventId}`,
+        });
+
+        await updatePaymentEventOutcome(paymentEvent.id, {
+          paymentId: payment.id,
+          outcome: result.alreadyCompleted ? 'duplicate' : 'processed',
+        });
+
+        console.info(
+          {
+            userId: payment.userId,
+            paymentId: payment.id,
             stripeEventId,
             eventType,
             idempotencyKey,
-            outcome: 'processed',
+            outcome: result.alreadyCompleted ? 'duplicate' : 'processed',
             timestamp: new Date().toISOString(),
-          }, 'processed webhook event');
-        });
+          },
+          'processed webhook event'
+        );
       } catch (err) {
-        console.error('Failed processing webhook:', err);
-        await prisma.paymentEvent.updateMany({ where: { stripeEventId }, data: { outcome: 'failed', processedAt: new Date() } });
+        if (!(err instanceof PaymentNotFoundError)) {
+          console.error('Failed processing webhook:', err);
+        }
+        await updatePaymentEventOutcome(paymentEvent.id, {
+          outcome: 'failed',
+        });
       }
+    } else {
+      await updatePaymentEventOutcome(paymentEvent.id, {
+        outcome: 'ignored',
+      });
     }
 
     res.status(200).send('ok');

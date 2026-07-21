@@ -57,6 +57,7 @@ describe('POST /api/payments/checkout', () => {
 
   afterEach(async () => {
     await prisma.paymentEvent.deleteMany({});
+    await prisma.subscription.deleteMany({});
     await prisma.payment.deleteMany({});
     await prisma.user.deleteMany({ where: { id: testUserId } });
 

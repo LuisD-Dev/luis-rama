@@ -30,6 +30,7 @@ describe('Payment idempotency', () => {
 
   afterEach(async () => {
     await prisma.paymentEvent.deleteMany({});
+    await prisma.subscription.deleteMany({});
     await prisma.payment.deleteMany({});
     await prisma.user.deleteMany({ where: { id: testUserId } });
   });
@@ -97,12 +98,12 @@ describe('Payment idempotency', () => {
     expect(res1.statusCode).toBe(200);
 
     const paymentAfterFirst = await prisma.payment.findUnique({ where: { id: payment.id } });
-    expect(paymentAfterFirst.status).toBe('processed');
+    expect(paymentAfterFirst.status).toBe('completed');
 
     const firstEvent = await prisma.paymentEvent.findUnique({ where: { stripeEventId: eventPayload.id } });
     expect(firstEvent).not.toBeNull();
     expect(firstEvent.outcome).toBe('processed');
-    expect(firstEvent.idempotencyKey).toBe(payment.idempotencyKey);
+    expect(firstEvent.idempotencyKey).toBe(`stripe:${eventPayload.id}`);
 
     const res2 = await request(app)
       .post('/api/webhooks/stripe')
@@ -116,9 +117,10 @@ describe('Payment idempotency', () => {
     expect(paymentEvents.length).toBe(1);
 
     const paymentAfterSecond = await prisma.payment.findUnique({ where: { id: payment.id } });
-    expect(paymentAfterSecond.status).toBe('processed');
+    expect(paymentAfterSecond.status).toBe('completed');
 
     const userAfter = await prisma.user.findUnique({ where: { id: payment.userId } });
     expect(userAfter.planTier).toBe('pro');
+    expect(userAfter.role).toBe('premium');
   }, 20000);
 });
