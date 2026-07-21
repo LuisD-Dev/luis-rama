@@ -2,6 +2,7 @@ import express from 'express';
 import validate from '../middleware/validate.js';
 import * as paymentSchemas from '../schemas/payment.schema.js';
 import { createOrReusePayment } from '../services/paymentService.js';
+import { checkout } from '../controllers/paymentsController.js';
 import { verifyToken } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -33,6 +34,13 @@ router.post(
       next(err);
     }
   }
+);
+
+router.post(
+  '/checkout',
+  verifyToken,
+  validate(paymentSchemas.createCheckout),
+  checkout
 );
 
 export default router;

@@ -210,6 +210,41 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ----
 
+**Payments routes** (`/api/payments`)
+
+- POST /api/payments/checkout
+  - Description: Create a Stripe Checkout Session for the authenticated user’s selected plan. Persists a pending `Payment` linked to the session and returns the hosted Checkout URL.
+  - Auth required: Yes (Bearer token)
+  - Body example:
+
+```json
+{
+  "plan": "basico"
+}
+```
+
+  - Accepted `plan` values: `basico`, `pro`, `master` (mapped to Stripe Price IDs via `STRIPE_PRICE_BASICO`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_MASTER`).
+  - Response example (200):
+
+```json
+{
+  "checkoutUrl": "https://checkout.stripe.com/c/pay/cs_test_...",
+  "sessionId": "cs_test_..."
+}
+```
+
+  - Error responses:
+    - `401` — missing or invalid JWT
+    - `400` — missing/invalid `plan`, or missing Stripe price / success/cancel URL configuration
+    - `502` — Stripe API failure (safe client message; details logged server-side only)
+
+- POST /api/payments/payment-method
+  - Description: Existing Stripe Elements path. Confirms a PaymentIntent for a tokenized `paymentMethodId` (not hosted Checkout).
+  - Auth required: Yes (Bearer token)
+  - Body: `{ "paymentMethodId": "pm_...", "planTier": "basico", "idempotencyKey": "..." }` (idempotency key may also be sent as `Idempotency-Key` header)
+
+----
+
 Notes and mapping
 
 - The API endpoints in this documentation correspond to the server code under `Backend/routes`.

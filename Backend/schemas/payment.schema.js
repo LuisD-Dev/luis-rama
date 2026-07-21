@@ -5,3 +5,9 @@ export const createPaymentMethod = z.object({
   planTier: z.enum(['basico', 'pro', 'master']),
   idempotencyKey: z.string().optional(),
 });
+
+export const createCheckout = z.object({
+  plan: z.enum(['basico', 'pro', 'master'], {
+    message: 'plan must be one of: basico, pro, master',
+  }),
+});
