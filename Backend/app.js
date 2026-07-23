@@ -27,6 +27,10 @@ if (!process.env.JWT_SECRET) {
 
 app.use(cors());
 app.use('/api/webhooks', express.raw({ type: 'application/json' }), webhooksRoutes);
+// Stripe subscription webhook needs the exact raw bytes to verify stripe-signature,
+// so this must be mounted before the global express.json() below. Scoped to this
+// one path — every other /api/payments/* route still gets normal JSON parsing.
+app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

@@ -17,6 +17,7 @@ model User {
   resetPin          String?   @map("reset_pin")
   resetPinExpiresAt DateTime? @map("reset_pin_expires_at")
   planTier          String?   @map("plan_tier")
+  stripeCustomerId  String?   @unique @map("stripe_customer_id")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
   payments          Payment[]
@@ -104,4 +105,17 @@ model PaymentEvent {
   payment Payment? @relation(fields: [paymentId], references: [id])
 
   @@map("payment_events")
+}
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  actor       String
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    Int?     @map("entity_id")
+  beforeState String?  @map("before_state")
+  afterState  String?  @map("after_state")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("audit_logs")
 }

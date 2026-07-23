@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import https from 'https';
+import Stripe from 'stripe';
 import prisma from '../utils/prismaClient.js';
 import { PLAN_TIERS, normalizePlanTier } from '../utils/plans.js';
 
@@ -24,6 +25,14 @@ const PRICE_ENV_BY_PLAN = {
 };
 
 const DEFAULT_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
+
+const SUBSCRIPTION_EVENT_TYPES = new Set([
+  'checkout.session.completed',
+  'invoice.paid',
+  'invoice.payment_failed',
+  'customer.subscription.updated',
+  'customer.subscription.deleted',
+]);
 
 export class PaymentServiceError extends Error {
   constructor(message, { statusCode = 502, clientMessage } = {}) {
@@ -55,6 +64,69 @@ export class PaymentNotFoundError extends PaymentServiceError {
 }
 
 const getStripeSecret = () => process.env.STRIPE_SECRET_KEY || '';
+
+let cachedStripeClient = null;
+let cachedStripeClientKey = null;
+
+/**
+ * Lazily construct a Stripe SDK client. Used only for local/offline operations
+ * (webhook signature construction) — the rest of this module talks to Stripe
+ * over raw HTTPS via `stripeRequest`. A placeholder key is used when
+ * STRIPE_SECRET_KEY is not configured (e.g. tests), since signature
+ * verification does not make network calls.
+ */
+export const getStripeClient = () => {
+  const key = getStripeSecret() || 'sk_test_placeholder_key_for_signature_verification';
+  if (!cachedStripeClient || cachedStripeClientKey !== key) {
+    cachedStripeClient = new Stripe(key);
+    cachedStripeClientKey = key;
+  }
+  return cachedStripeClient;
+};
+
+/**
+ * Verify a Stripe webhook request and return the parsed event.
+ * Throws Stripe.errors.StripeSignatureVerificationError on invalid/missing signature.
+ */
+export function constructStripeEvent(rawBody, signatureHeader) {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    throw new PaymentServiceError('Missing STRIPE_WEBHOOK_SECRET', {
+      statusCode: 500,
+      clientMessage: 'Webhook not configured',
+    });
+  }
+  return getStripeClient().webhooks.constructEvent(rawBody, signatureHeader, webhookSecret);
+}
+
+const resolvePlanTierForPriceId = (priceId) => {
+  if (!priceId) return null;
+  for (const [plan, envKey] of Object.entries(PRICE_ENV_BY_PLAN)) {
+    if (process.env[envKey] && process.env[envKey] === priceId) {
+      return plan;
+    }
+  }
+  return null;
+};
+
+const toDateFromUnixSeconds = (unixSeconds) =>
+  typeof unixSeconds === 'number' ? new Date(unixSeconds * 1000) : null;
+
+const mapStripeSubscriptionStatus = (stripeStatus) => {
+  switch (stripeStatus) {
+    case 'active':
+    case 'trialing':
+      return 'active';
+    case 'canceled':
+    case 'incomplete_expired':
+      return 'canceled';
+    case 'past_due':
+    case 'unpaid':
+    case 'incomplete':
+    default:
+      return 'past_due';
+  }
+};
 
 const stripeRequest = ({ path, method = 'POST', body, idempotencyKey }) =>
   new Promise((resolve, reject) => {
@@ -402,6 +474,340 @@ export async function updatePaymentEventOutcome(
   });
 }
 
+const writeAuditLog = (
+  tx,
+  { actor = 'stripe-webhook', action, entityType, entityId = null, before = null, after = null }
+) =>
+  tx.auditLog.create({
+    data: {
+      actor,
+      action,
+      entityType,
+      entityId,
+      beforeState: before == null ? null : JSON.stringify(before),
+      afterState: after == null ? null : JSON.stringify(after),
+    },
+  });
+
+const applyUserEntitlements = (tx, { userId, planTier, role }) =>
+  tx.user.update({ where: { id: userId }, data: { planTier, role } });
+
+const findLocalSubscriptionByExternalId = (tx, externalId) =>
+  tx.subscription.findUnique({
+    where: { provider_externalId: { provider: 'stripe', externalId } },
+  });
+
+const upsertLocalSubscription = async (
+  tx,
+  { userId, planTier, status, externalId, currentPeriodStart, currentPeriodEnd }
+) => {
+  const existing = await findLocalSubscriptionByExternalId(tx, externalId);
+  if (existing) {
+    return tx.subscription.update({
+      where: { id: existing.id },
+      data: { planTier, status, currentPeriodStart, currentPeriodEnd },
+    });
+  }
+  return tx.subscription.create({
+    data: {
+      userId,
+      planTier,
+      status,
+      provider: 'stripe',
+      externalId,
+      currentPeriodStart,
+      currentPeriodEnd,
+    },
+  });
+};
+
+/**
+ * checkout.session.completed — only meaningful for mode:'subscription' sessions
+ * created by createCheckoutSession. Activates the local Subscription + user
+ * entitlements and captures the Stripe customer id for later webhook lookups.
+ */
+async function handleCheckoutSessionCompleted(tx, session) {
+  if (session.mode !== 'subscription' || !session.subscription) {
+    return { outcome: 'ignored' };
+  }
+
+  const metaPaymentId = Number.parseInt(String(session.metadata?.paymentId || ''), 10) || null;
+  const payment =
+    (metaPaymentId && (await tx.payment.findUnique({ where: { id: metaPaymentId } }))) ||
+    (session.id && (await tx.payment.findUnique({ where: { stripeCheckoutSessionId: session.id } })));
+
+  const userId = payment?.userId || Number.parseInt(String(session.client_reference_id || ''), 10) || null;
+  const planTier = payment?.planTier || null;
+
+  if (!userId || !planTier) {
+    return { outcome: 'ignored' };
+  }
+
+  const beforeUser = await tx.user.findUnique({ where: { id: userId } });
+  if (!beforeUser) {
+    return { outcome: 'ignored' };
+  }
+
+  if (session.customer && beforeUser.stripeCustomerId !== session.customer) {
+    await tx.user.update({ where: { id: userId }, data: { stripeCustomerId: session.customer } });
+  }
+
+  if (payment && payment.status !== 'completed') {
+    await tx.payment.update({
+      where: { id: payment.id },
+      data: { status: 'completed', externalId: session.subscription },
+    });
+  }
+
+  const now = new Date();
+  const subscription = await upsertLocalSubscription(tx, {
+    userId,
+    planTier,
+    status: 'active',
+    externalId: session.subscription,
+    currentPeriodStart: now,
+    currentPeriodEnd: new Date(now.getTime() + DEFAULT_PERIOD_MS),
+  });
+
+  const afterUser = await applyUserEntitlements(tx, { userId, planTier, role: 'premium' });
+
+  await writeAuditLog(tx, {
+    action: 'checkout.session.completed',
+    entityType: 'subscription',
+    entityId: subscription.id,
+    before: { planTier: beforeUser.planTier, role: beforeUser.role },
+    after: { planTier: afterUser.planTier, role: afterUser.role, subscriptionStatus: subscription.status },
+  });
+
+  return { outcome: 'processed' };
+}
+
+/** invoice.paid — renewal succeeded: keep the subscription active and extend the period. */
+async function handleInvoicePaid(tx, invoice) {
+  const subscription = invoice.subscription && (await findLocalSubscriptionByExternalId(tx, invoice.subscription));
+  if (!subscription) {
+    return { outcome: 'ignored' };
+  }
+
+  const beforeUser = await tx.user.findUnique({ where: { id: subscription.userId } });
+
+  const updatedSub = await tx.subscription.update({
+    where: { id: subscription.id },
+    data: {
+      status: 'active',
+      currentPeriodStart: toDateFromUnixSeconds(invoice.period_start) || subscription.currentPeriodStart,
+      currentPeriodEnd: toDateFromUnixSeconds(invoice.period_end) || subscription.currentPeriodEnd,
+    },
+  });
+
+  const afterUser = await applyUserEntitlements(tx, {
+    userId: subscription.userId,
+    planTier: subscription.planTier,
+    role: 'premium',
+  });
+
+  await writeAuditLog(tx, {
+    action: 'invoice.paid',
+    entityType: 'subscription',
+    entityId: updatedSub.id,
+    before: { status: subscription.status, planTier: beforeUser?.planTier, role: beforeUser?.role },
+    after: { status: updatedSub.status, planTier: afterUser.planTier, role: afterUser.role },
+  });
+
+  return { outcome: 'processed' };
+}
+
+/**
+ * invoice.payment_failed — mark the subscription past_due. Entitlements are left
+ * untouched (grace period); only customer.subscription.deleted downgrades the user.
+ */
+async function handleInvoicePaymentFailed(tx, invoice) {
+  const subscription = invoice.subscription && (await findLocalSubscriptionByExternalId(tx, invoice.subscription));
+  if (!subscription) {
+    return { outcome: 'ignored' };
+  }
+
+  const updatedSub = await tx.subscription.update({
+    where: { id: subscription.id },
+    data: { status: 'past_due' },
+  });
+
+  await writeAuditLog(tx, {
+    action: 'invoice.payment_failed',
+    entityType: 'subscription',
+    entityId: updatedSub.id,
+    before: { status: subscription.status },
+    after: { status: updatedSub.status },
+  });
+
+  return { outcome: 'processed' };
+}
+
+/**
+ * customer.subscription.updated — sync plan/status/period from Stripe's source of
+ * truth. Resolves the owning user via the local Subscription row, falling back to
+ * User.stripeCustomerId for the first event seen for a given subscription.
+ */
+async function handleSubscriptionUpdated(tx, sub) {
+  const priceId = sub.items?.data?.[0]?.price?.id || null;
+  const planTierFromPrice = resolvePlanTierForPriceId(priceId);
+  const mappedStatus = mapStripeSubscriptionStatus(sub.status);
+
+  const localSub = await findLocalSubscriptionByExternalId(tx, sub.id);
+  let userId = localSub?.userId || null;
+
+  if (!userId && sub.customer) {
+    const user = await tx.user.findUnique({ where: { stripeCustomerId: sub.customer } });
+    userId = user?.id || null;
+  }
+
+  const planTier = planTierFromPrice || localSub?.planTier || null;
+
+  if (!userId || !planTier) {
+    return { outcome: 'ignored' };
+  }
+
+  const beforeUser = await tx.user.findUnique({ where: { id: userId } });
+
+  const updatedSub = await upsertLocalSubscription(tx, {
+    userId,
+    planTier,
+    status: mappedStatus,
+    externalId: sub.id,
+    currentPeriodStart: toDateFromUnixSeconds(sub.current_period_start) || new Date(),
+    currentPeriodEnd:
+      toDateFromUnixSeconds(sub.current_period_end) || new Date(Date.now() + DEFAULT_PERIOD_MS),
+  });
+
+  let afterUser = beforeUser;
+  if (mappedStatus === 'active') {
+    afterUser = await applyUserEntitlements(tx, { userId, planTier, role: 'premium' });
+  } else if (mappedStatus === 'canceled') {
+    afterUser = await applyUserEntitlements(tx, { userId, planTier: null, role: 'student' });
+  }
+  // past_due: leave entitlements untouched (grace period)
+
+  await writeAuditLog(tx, {
+    action: 'customer.subscription.updated',
+    entityType: 'subscription',
+    entityId: updatedSub.id,
+    before: { status: localSub?.status, planTier: beforeUser?.planTier, role: beforeUser?.role },
+    after: { status: updatedSub.status, planTier: afterUser.planTier, role: afterUser.role },
+  });
+
+  return { outcome: 'processed' };
+}
+
+/** customer.subscription.deleted — subscription fully canceled: downgrade the user. */
+async function handleSubscriptionDeleted(tx, sub) {
+  const localSub = await findLocalSubscriptionByExternalId(tx, sub.id);
+  if (!localSub) {
+    return { outcome: 'ignored' };
+  }
+
+  const beforeUser = await tx.user.findUnique({ where: { id: localSub.userId } });
+
+  const updatedSub = await tx.subscription.update({
+    where: { id: localSub.id },
+    data: { status: 'canceled' },
+  });
+
+  const afterUser = await applyUserEntitlements(tx, {
+    userId: localSub.userId,
+    planTier: null,
+    role: 'student',
+  });
+
+  await writeAuditLog(tx, {
+    action: 'customer.subscription.deleted',
+    entityType: 'subscription',
+    entityId: updatedSub.id,
+    before: { status: localSub.status, planTier: beforeUser?.planTier, role: beforeUser?.role },
+    after: { status: updatedSub.status, planTier: afterUser.planTier, role: afterUser.role },
+  });
+
+  return { outcome: 'processed' };
+}
+
+/**
+ * Process one verified Stripe webhook event. Records the event, applies its
+ * effect, and writes an audit log entry, all inside a single transaction:
+ * a mid-transaction failure rolls back everything, including the PaymentEvent
+ * insert, so a retried delivery is not mistaken for a duplicate.
+ *
+ * Idempotency relies on the `payment_events.stripe_event_id` UNIQUE constraint
+ * (caught as P2002) rather than a prior findFirst, to avoid a check-then-insert race.
+ */
+export async function processStripeWebhookEvent(event) {
+  const stripeEventId = event?.id;
+  const eventType = event?.type;
+
+  if (!stripeEventId || !eventType) {
+    throw new PaymentServiceError('Malformed Stripe event', {
+      statusCode: 400,
+      clientMessage: 'Malformed Stripe event',
+    });
+  }
+
+  return prisma.$transaction(async (tx) => {
+    let paymentEvent;
+    try {
+      paymentEvent = await tx.paymentEvent.create({
+        data: {
+          type: eventType,
+          payload: JSON.stringify(event),
+          idempotencyKey: `stripe_sub:${stripeEventId}`,
+          stripeEventId,
+          outcome: 'processing',
+          processedAt: null,
+        },
+      });
+    } catch (err) {
+      if (err?.code === 'P2002') {
+        return { outcome: 'duplicate', eventType };
+      }
+      throw err;
+    }
+
+    if (!SUBSCRIPTION_EVENT_TYPES.has(eventType)) {
+      await tx.paymentEvent.update({
+        where: { id: paymentEvent.id },
+        data: { outcome: 'ignored', processedAt: new Date() },
+      });
+      return { outcome: 'ignored', eventType };
+    }
+
+    const object = event.data?.object || {};
+    let result;
+    switch (eventType) {
+      case 'checkout.session.completed':
+        result = await handleCheckoutSessionCompleted(tx, object);
+        break;
+      case 'invoice.paid':
+        result = await handleInvoicePaid(tx, object);
+        break;
+      case 'invoice.payment_failed':
+        result = await handleInvoicePaymentFailed(tx, object);
+        break;
+      case 'customer.subscription.updated':
+        result = await handleSubscriptionUpdated(tx, object);
+        break;
+      case 'customer.subscription.deleted':
+        result = await handleSubscriptionDeleted(tx, object);
+        break;
+      default:
+        result = { outcome: 'ignored' };
+    }
+
+    await tx.paymentEvent.update({
+      where: { id: paymentEvent.id },
+      data: { outcome: result.outcome, processedAt: new Date() },
+    });
+
+    return { outcome: result.outcome, eventType };
+  });
+}
+
 export async function findPaymentForStripeWebhook({
   stripePaymentIntentId,
   paymentId,
@@ -588,7 +994,7 @@ export async function createCheckoutSession({ userId, plan }) {
     }
 
     const body = {
-      mode: 'payment',
+      mode: 'subscription',
       success_url: successUrl,
       cancel_url: cancelUrl,
       client_reference_id: String(userId),
@@ -664,6 +1070,9 @@ export default {
   createOrReusePayment,
   createCheckoutSession,
   markPaymentProcessed,
+  getStripeClient,
+  constructStripeEvent,
+  processStripeWebhookEvent,
   PaymentServiceError,
   InvalidPlanError,
   PaymentNotFoundError,
