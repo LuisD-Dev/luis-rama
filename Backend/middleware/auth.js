@@ -80,6 +80,7 @@ export const verifyToken = (req, res, next) => {
     role: decoded.role,
     iat: decoded.iat,
     exp: decoded.exp,
+    ...(decoded.planTier ? { planTier: decoded.planTier } : {}),
   };
 
   next();
@@ -141,6 +142,7 @@ export const optionalAuth = (req, res, next) => {
     role: decoded.role,
     iat: decoded.iat,
     exp: decoded.exp,
+    ...(decoded.planTier ? { planTier: decoded.planTier } : {}),
   };
 
   next();
