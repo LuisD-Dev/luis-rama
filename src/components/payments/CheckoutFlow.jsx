@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth.js';
 import StripeCardForm from './StripeCardForm.jsx';
 import { Confetti } from '../common/Confetti.jsx';
+import { createPaymentIntent } from '../../services/api.js';
+
+const PAYMENTS_ENABLED = import.meta.env.VITE_PAYMENTS_ENABLED === 'true';
 
 const PLANS = [
   { label: 'Básico', price: '$9.99', value: 'basico', features: ['Acceso a recursos', 'Lecciones guiadas', 'Comunidad privada'] },
@@ -34,12 +37,15 @@ const SecureBadge = () => (
 );
 
 export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => {
-  const { user } = useAuth();
+  const { user, token: userToken } = useAuth();
   const navigate = useNavigate();
   const initialSelection = normalizePlan(initialPlan) || readStoredPlan();
   const [step, setStep] = useState(() => (initialSelection ? 'review' : 'select_plan'));
   const [selectedPlan, setSelectedPlan] = useState(initialSelection);
   const [succeeded, setSucceeded] = useState(false);
+  const [paymentId, setPaymentId] = useState(null);
+  const [intentLoading, setIntentLoading] = useState(false);
+  const [intentError, setIntentError] = useState(null);
 
   useEffect(() => {
     if (selectedPlan) sessionStorage.setItem(STORAGE_KEY, selectedPlan);
@@ -57,6 +63,42 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
     return false;
   };
 
+  const handleProceedToPayment = async () => {
+    if (!ensureAuthenticated()) return;
+
+    setIntentLoading(true);
+    setIntentError(null);
+
+    try {
+      const data = await createPaymentIntent(planData.value, userToken);
+
+      if (!data?.paymentId) {
+        throw new Error('No se recibió confirmación del servidor');
+      }
+
+      setPaymentId(data.paymentId);
+
+      if (!PAYMENTS_ENABLED) {
+        sessionStorage.removeItem(STORAGE_KEY);
+        sessionStorage.removeItem('checkout_resume');
+        setSucceeded(true);
+        setTimeout(() => onComplete?.(), 2400);
+      } else {
+        setStep('payment_method');
+      }
+    } catch (err) {
+      if (err.response?.data?.error === 'invalid_plan') {
+        setIntentError('El plan seleccionado no es válido. Intenta con otro.');
+      } else if (err.message?.includes('Network Error') || err.message?.includes('Failed to fetch')) {
+        setIntentError('No se pudo conectar con el servidor. Verifica tu conexión e intenta de nuevo.');
+      } else {
+        setIntentError(err.response?.data?.error || err.message || 'No se pudo procesar la solicitud. Intenta de nuevo.');
+      }
+    } finally {
+      setIntentLoading(false);
+    }
+  };
+
   if (succeeded && planData) {
     return (
       <div className="checkout-step">
@@ -64,7 +106,11 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
         <div className="checkout-success">
           <div className="checkout-success-check" aria-hidden="true">✓</div>
           <h3>¡Bienvenido a {planData.label}!</h3>
-          <p>Tu método de pago se registró correctamente. Ya puedes disfrutar de tu plan.</p>
+          <p>
+            {paymentId
+              ? `Compra registrada exitosamente (ID: ${paymentId}). Ya puedes disfrutar de tu plan.`
+              : 'Tu método de pago se registró correctamente. Ya puedes disfrutar de tu plan.'}
+          </p>
         </div>
       </div>
     );
@@ -132,6 +178,13 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
             <span>{user?.email || 'Sesión requerida'}</span>
           </div>
         </div>
+
+        {intentError && (
+          <div className="error-message" role="alert" style={{ marginBottom: '1rem' }}>
+            {intentError}
+          </div>
+        )}
+
         <div className="checkout-actions">
           <button type="button" className="button button-secondary" onClick={() => setStep('select_plan')}>
             Atrás
@@ -139,12 +192,14 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
           <button
             type="button"
             className="button button-primary"
-            onClick={() => {
-              if (!ensureAuthenticated()) return;
-              setStep('payment_method');
-            }}
+            disabled={intentLoading}
+            onClick={handleProceedToPayment}
           >
-            {user ? 'Ir a pagar' : 'Inicia sesión para pagar'}
+            {intentLoading ? (
+              <span className="btn-loading"><span className="spinner" /> Procesando…</span>
+            ) : (
+              user ? 'Ir a pagar' : 'Inicia sesión para pagar'
+            )}
           </button>
         </div>
         <SecureBadge />
@@ -180,6 +235,11 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
           <div className="plan-name">Plan {planData.label}</div>
           <div className="plan-cost">{planData.price}</div>
         </div>
+        {paymentId && (
+          <p className="text-muted" style={{ fontSize: '0.8rem', marginBottom: '0.5rem' }}>
+            Intención de pago: {paymentId}
+          </p>
+        )}
         {paymentForm}
         <button type="button" className="button button-ghost button-block" onClick={() => setStep('review')}>
           Atrás
