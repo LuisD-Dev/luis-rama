@@ -30,6 +30,16 @@ CREATE TABLE IF NOT EXISTS site_stats (
   value INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS payments (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  plan_tier TEXT NOT NULL,
+  amount REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 INSERT INTO users (email, password_hash, name, role, plan_tier)
 VALUES (
   'austinrmz2007@gmail.com',

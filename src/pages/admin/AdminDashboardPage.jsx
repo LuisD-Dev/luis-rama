@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Icon } from '../../components/common/Icons.jsx';
 import { useContent } from '../../context/ContentContext.jsx';
 import { useAuth } from '../../hooks/useAuth.js';
-import { statsService } from '../../services/api.js';
+import { adminService, authService, statsService } from '../../services/api.js';
 import { useKeyboardShortcuts, KeyboardShortcutsHelp } from '../../components/common/KeyboardShortcuts.jsx';
 
 const StatCard = ({ label, value, icon, trend, highlight }) => (
@@ -33,8 +33,8 @@ export const AdminDashboardPage = () => {
   const navigate = useNavigate();
   const { content } = useContent();
   const { user } = useAuth();
-  const [pageVisits, setPageVisits] = useState(null);
-  const [studentCount, setStudentCount] = useState(null);
+  const [dashboardStats, setDashboardStats] = useState(null);
+  const [statsError, setStatsError] = useState('');
   const [loading, setLoading] = useState(true);
   const [showShortcuts, setShowShortcuts] = useState(false);
 
@@ -48,23 +48,61 @@ export const AdminDashboardPage = () => {
   });
 
   const recentContent = content.slice(0, 5);
-  const stats = {
-    total: content.length,
-    videos: content.filter(c => c.type === 'video').length,
-    pdfs: content.filter(c => c.type === 'pdf').length,
-    audios: content.filter(c => c.type === 'audio').length,
-    images: content.filter(c => c.type === 'image').length,
+  const formatCurrency = (amount, currency = 'USD') => {
+    return new Intl.NumberFormat('es-ES', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount ?? 0);
   };
 
-  useEffect(() => {
-    statsService
-      .getVisitStats()
+  const loadDashboardStats = () => {
+    setLoading(true);
+    setStatsError('');
+
+    adminService
+      .getDashboardStats()
       .then((res) => {
-        setPageVisits(res.data.pageVisits || 0);
-        setStudentCount(res.data.studentCount || 0);
+        setDashboardStats(res.data);
       })
-      .catch(() => {})
+      .catch(async () => {
+        try {
+          const [visitsRes, studentsRes] = await Promise.all([
+            statsService.getVisitStats(),
+            authService.getStudents(),
+          ]);
+
+          const studentList = Array.isArray(studentsRes?.data?.students)
+            ? studentsRes.data.students
+            : [];
+
+          setDashboardStats({
+            pageVisits: visitsRes?.data?.pageVisits ?? 0,
+            studentCount: studentList.length,
+            revenueThisMonth: 0,
+            revenueLastMonth: 0,
+            revenueChange: 0,
+            activeSubscriptions: { basico: 0, pro: 0, master: 0, total: 0 },
+            currency: 'USD',
+          });
+
+          setStatsError('Ingresos no disponibles en este servidor. Se muestran estudiantes y visitas en tiempo real.');
+        } catch (_fallbackError) {
+          setStatsError('No se pudieron cargar las métricas. Intenta nuevamente.');
+        }
+      })
       .finally(() => setLoading(false));
+  };
+
+  const stats = {
+    total: content.length,
+  };
+
+  const activeSubscriptions = dashboardStats?.activeSubscriptions || { basico: 0, pro: 0, master: 0, total: 0 };
+
+  useEffect(() => {
+    loadDashboardStats();
   }, []);
 
   return (
@@ -89,6 +127,14 @@ export const AdminDashboardPage = () => {
 
         <div className="admin-stats">
           <h2>Resumen del panel</h2>
+          {statsError && (
+            <div className="stats-error" role="alert">
+              <p>{statsError}</p>
+              <button type="button" className="button button-ghost small" onClick={loadDashboardStats}>
+                Reintentar
+              </button>
+            </div>
+          )}
           <div className="stats-grid">
             {loading ? (
               <>
@@ -98,15 +144,31 @@ export const AdminDashboardPage = () => {
                 <SkeletonStat />
                 <SkeletonStat />
                 <SkeletonStat />
+                <SkeletonStat />
+                <SkeletonStat />
+                <SkeletonStat />
               </>
             ) : (
               <>
-                <StatCard label="Visitas a la página" value={pageVisits} icon="👁️" trend={12} highlight />
-                <StatCard label="Estudiantes" value={studentCount} icon="👥" trend={8} />
+                <StatCard label="Visitas a la página" value={dashboardStats?.pageVisits ?? 0} icon="👁️" />
+                <StatCard label="Estudiantes" value={dashboardStats?.studentCount ?? 0} icon="👥" />
+                <StatCard
+                  label="Ingresos este mes"
+                  value={formatCurrency(dashboardStats?.revenueThisMonth, dashboardStats?.currency || 'USD')}
+                  icon="💰"
+                  trend={dashboardStats?.revenueChange ?? 0}
+                  highlight
+                />
+                <StatCard
+                  label="Ingresos mes pasado"
+                  value={formatCurrency(dashboardStats?.revenueLastMonth, dashboardStats?.currency || 'USD')}
+                  icon="📆"
+                />
+                <StatCard label="Suscripciones activas" value={activeSubscriptions.total} icon="🔔" />
+                <StatCard label="Plan básico" value={activeSubscriptions.basico} icon="🥉" />
+                <StatCard label="Plan pro" value={activeSubscriptions.pro} icon="🥈" />
+                <StatCard label="Plan master" value={activeSubscriptions.master} icon="🥇" />
                 <StatCard label="Total contenidos" value={stats.total} icon="📚" />
-                <StatCard label="Videos" value={stats.videos} icon="🎬" />
-                <StatCard label="PDFs" value={stats.pdfs} icon="📄" />
-                <StatCard label="Audios" value={stats.audios} icon="🎵" highlight />
               </>
             )}
           </div>

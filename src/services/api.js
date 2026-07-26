@@ -2,8 +2,9 @@ import axios from 'axios';
 import { getRequestSignal, invokeLogout } from '../utils/authSession.js';
 import { getCsrfToken, getStoredToken, generateCsrfToken } from '../utils/jwt.js';
 
-export const BACKEND_BASE_URL = 'https://teclia-academia-2.onrender.com';
-const API_BASE_URL = `${BACKEND_BASE_URL}/api`;
+const REMOTE_BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL || 'https://teclia-academia-2.onrender.com';
+export const BACKEND_BASE_URL = import.meta.env.DEV ? '' : REMOTE_BACKEND_BASE_URL;
+const API_BASE_URL = import.meta.env.DEV ? '/api' : `${REMOTE_BACKEND_BASE_URL}/api`;
 
 const api = axios.create({
   baseURL: API_BASE_URL,

@@ -10,8 +10,7 @@ import { useInactivityTimer } from './hooks/useInactivityTimer.js';
 import { AppRoutes } from './routes/index.jsx';
 import { useAuth } from './hooks/useAuth.js';
 
-const AppShell = () => {
-  const { toast, showSessionExpiredToast, dismissToast } = useSessionToast();
+const AppShellContent = () => {
   const { user, logout } = useAuth();
 
   const handleTimeout = () => {
@@ -19,6 +18,22 @@ const AppShell = () => {
   };
 
   const { showWarning, dismissWarning } = useInactivityTimer(handleTimeout, !!user);
+
+  return (
+    <>
+      <AppRoutes />
+      {showWarning && (
+        <InactivityModal
+          onDismiss={dismissWarning}
+          onLogout={() => logout({ redirectTo: '/auth/login' })}
+        />
+      )}
+    </>
+  );
+};
+
+const AppShell = () => {
+  const { toast, showSessionExpiredToast, dismissToast } = useSessionToast();
 
   return (
     <ErrorBoundary>
@@ -31,13 +46,7 @@ const AppShell = () => {
               visible={toast.visible}
               onDismiss={dismissToast}
             />
-            <AppRoutes />
-            {showWarning && (
-              <InactivityModal
-                onDismiss={dismissWarning}
-                onLogout={() => logout({ redirectTo: '/auth/login' })}
-              />
-            )}
+            <AppShellContent />
           </ToastProvider>
         </ContentProvider>
       </AuthProvider>
