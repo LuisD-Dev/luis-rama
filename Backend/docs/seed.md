@@ -169,12 +169,12 @@ The seeding system inserts 6+ content records across three types:
 **Videos (2 records):**
 
 - "Piano Basics - Getting Started" — free, beginner level
-- "Advanced Piano Techniques" — premium (basico tier)
+- "Advanced Piano Techniques" — basico tier
 
 **Articles (2 records):**
 
 - "Understanding Music Theory Fundamentals" — free
-- "Jazz Improvisation Guide" — premium tier
+- "Jazz Improvisation Guide" — basico tier
 
 **Quizzes (2 records):**
 
@@ -182,6 +182,9 @@ The seeding system inserts 6+ content records across three types:
 - "Intermediate Piano Skills Assessment" — basico tier
 
 All content is authored by the admin user (`admin@teclia.dev`).
+
+Canonical content plan tiers: free < basico < pro < master.
+Legacy premium values are treated as basico during migration and compatibility checks.
 
 ---
 

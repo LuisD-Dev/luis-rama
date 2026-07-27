@@ -4,5 +4,6 @@ export default {
   testMatch: ['**/?(*.)+(test).[jt]s'],
   setupFiles: ['<rootDir>/tests/helpers/env.setup.js'],
   transform: {},
-  testTimeout: 20000
+  testTimeout: 20000,
+  maxWorkers: 1,
 };

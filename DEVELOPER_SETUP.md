@@ -78,6 +78,59 @@ npm run dev
 
 The Vite dev server typically runs on `http://localhost:5173`.
 
+## Stripe Elements and test payments
+
+The card form uses Stripe Elements. Card data is entered inside Stripe's hosted iframe and does not pass through React state or the Teclia API. The frontend sends the backend only a Stripe Payment Method identifier.
+
+### Get a test publishable key
+
+1. Create or open a Stripe account at [dashboard.stripe.com](https://dashboard.stripe.com/).
+2. Enable test mode in the Stripe Dashboard.
+3. Open **Developers > API keys** and copy the **Publishable key** that starts with `pk_test_`.
+4. Never put a secret key (`sk_test_` or `sk_live_`) in a `VITE_` variable. Vite variables are included in browser code.
+
+### Configure the frontend locally
+
+Create `.env` at the repository root (next to `package.json`) and add:
+
+```dotenv
+VITE_STRIPE_PUBLISHABLE_KEY=pk_test_your_key_here
+VITE_PAYMENTS_ENABLED=true
+```
+
+Restart `npm run dev` after changing either variable because Vite reads them when the app starts.
+
+`VITE_PAYMENTS_ENABLED=true` activates the Stripe form and allows the frontend to tokenize test cards with Stripe. It does not enable an end-to-end local checkout because the required backend route is not implemented yet. Set it to `false`, remove it, or omit `VITE_STRIPE_PUBLISHABLE_KEY` to show the safe **Pagos no disponibles** fallback. `VITE_PAYMENTS_ENABLED` is the Vite-exposed frontend equivalent of the `PAYMENTS_ENABLED` feature flag.
+
+### Backend contract
+
+After Stripe tokenizes the card successfully, the frontend attempts to call `POST /api/payments/payment-method` with this exact JSON body:
+
+```json
+{
+  "paymentMethodId": "pm_..."
+}
+```
+
+> ⚠️ **Nota:** el endpoint `POST /api/payments/payment-method` aún no está implementado en el backend de este repositorio. Hasta que se agregue, la tokenización con Stripe funcionará pero el envío del `paymentMethodId` al backend devolverá `404`.
+
+The request must never contain a card number, CVC, or expiration date. A future backend implementation must receive only this ID and perform any Payment Intent or subscription work server-side. Until that route exists, the complete checkout flow is unavailable in local development.
+
+### Stripe test cards
+
+Use these only while Stripe is in test mode. Use any future expiration date and any three-digit CVC unless the scenario says otherwise.
+
+| Scenario | Card number | Expected result |
+| --- | --- | --- |
+| Successful Visa | `4242 4242 4242 4242` | Tokenization succeeds |
+| Generic decline | `4000 0000 0000 0002` | Card declined |
+| Insufficient funds | `4000 0000 0000 9995` | Insufficient funds decline |
+| Expired card | `4000 0000 0000 0069` | Expired card error |
+| Incorrect CVC | `4000 0000 0000 0127` | Incorrect security code error |
+| Processing error | `4000 0000 0000 0119` | Temporary processing error |
+
+Do not use real card details in test mode. See Stripe's current [testing documentation](https://docs.stripe.com/testing) for more scenarios.
+
 ## 8) Connecting to Supabase (optional)
 
 If you prefer to use Supabase for storage and/or Postgres hosting:

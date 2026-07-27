@@ -1,13 +1,33 @@
 import { useState } from 'react';
-import { Icon } from '../common/Icons.jsx';
+import { Icon, UIIcon } from '../common/Icons.jsx';
 import { planLabel } from '../../utils/plans.js';
+import { ContentCard } from './ContentCard.jsx';
 
-export const ContentGrid = ({ content, onDelete, isAdmin = false }) => {
+const FILTERS = [
+  { value: 'all', label: 'Todos' },
+  { value: 'video', label: 'Video' },
+  { value: 'pdf', label: 'PDF' },
+  { value: 'audio', label: 'Audio' },
+  { value: 'image', label: 'Imagen' },
+];
+
+const SkeletonCard = () => (
+  <div className="skeleton-card" aria-hidden="true">
+    <div className="skeleton-thumb" />
+    <div className="skeleton-card-body">
+      <div className="skeleton-line skeleton-line-lg" />
+      <div className="skeleton-line skeleton-line-md" />
+      <div className="skeleton-line skeleton-line-sm" />
+    </div>
+  </div>
+);
+
+export const ContentGrid = ({ content = [], onDelete, isAdmin = false, user = null, loading = false }) => {
   const [filter, setFilter] = useState('all');
 
   const filteredContent = filter === 'all'
     ? content
-    : content.filter(item => item.type === filter);
+    : content.filter((item) => item.type === filter);
 
   const getIcon = (type) => <Icon type={type} className="content-type-icon" />;
 
@@ -15,80 +35,71 @@ export const ContentGrid = ({ content, onDelete, isAdmin = false }) => {
     <div className="content-section">
       <div className="content-header">
         <h2>Contenido</h2>
-        <div className="content-filters">
-          {['all','video','pdf','audio','image'].map(f => (
+        <div className="content-filters tc-filters">
+          {FILTERS.map((f) => (
             <button
-              key={f}
-              className={`filter-btn ${filter === f ? 'active' : ''}`}
-              onClick={() => setFilter(f)}
+              key={f.value}
+              className={`filter-btn ${filter === f.value ? 'active' : ''}`}
+              onClick={() => setFilter(f.value)}
             >
-              {f === 'all' ? 'Todos' : f.charAt(0).toUpperCase() + f.slice(1)}
+              {f.label}
             </button>
           ))}
         </div>
       </div>
 
-      {filteredContent.length === 0 ? (
+      {loading ? (
+        <div className="tc-grid">
+          {[1, 2, 3, 4].map((i) => <SkeletonCard key={i} />)}
+        </div>
+      ) : filteredContent.length === 0 ? (
         <div className="empty-state">
-          <p>No hay contenido {filter !== 'all' ? `de tipo ${filter}` : ''}</p>
+          <span className="empty-state-icon" aria-hidden="true"><UIIcon name="music" size={26} /></span>
+          <p>No hay contenido {filter !== 'all' ? `de tipo ${filter}` : 'disponible'} por ahora.</p>
+          <p className="text-muted">Vuelve pronto: se añaden recursos con frecuencia.</p>
+        </div>
+      ) : isAdmin ? (
+        <div className="content-table-wrapper">
+          <table className="content-table">
+            <thead>
+              <tr>
+                <th>Título</th>
+                <th>Tipo</th>
+                <th>Autor</th>
+                <th>Plan</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredContent.map((item) => (
+                <tr key={item.id} className="content-row">
+                  <td className="td-title">
+                    <div className="td-title-inner">
+                      <span className="content-icon-inline">{getIcon(item.type)}</span>
+                      <div>
+                        <div className="row-title">{item.title}</div>
+                        <div className="row-desc">{item.description || 'Sin descripción'}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td><span className="badge small">{item.type.toUpperCase()}</span></td>
+                  <td>{item.uploaded_by_name}</td>
+                  <td><span className="badge small">{planLabel(item.plan_tier || (item.is_free ? 'free' : 'basico'))}</span></td>
+                  <td className="td-actions">
+                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
+                    <button onClick={() => onDelete(item.id)} className="button button-danger small">Eliminar</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : (
-        isAdmin ? (
-          <div className="content-table-wrapper">
-            <table className="content-table">
-              <thead>
-                <tr>
-                  <th>Título</th>
-                  <th>Tipo</th>
-                  <th>Autor</th>
-                  <th>Plan</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredContent.map(item => (
-                  <tr key={item.id} className="content-row">
-                    <td className="td-title">
-                      <div className="td-title-inner">
-                        <span className="content-icon-inline">{getIcon(item.type)}</span>
-                        <div>
-                          <div className="row-title">{item.title}</div>
-                          <div className="row-desc">{item.description || 'Sin descripción'}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td><span className="badge small">{item.type.toUpperCase()}</span></td>
-                    <td>{item.uploaded_by_name}</td>
-                    <td><span className="badge small">{planLabel(item.plan_tier || (item.is_free ? 'free' : 'basico'))}</span></td>
-                    <td className="td-actions">
-                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
-                      <button onClick={() => onDelete(item.id)} className="button button-danger small">Eliminar</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="content-grid">
-            {filteredContent.map(item => (
-              <div key={item.id} className="content-card">
-                <div className="content-icon">{getIcon(item.type)}</div>
-                <h3>{item.title}</h3>
-                <p className="content-desc">{item.description || 'Sin descripción'}</p>
-                <p className="content-type">
-                  <span className="badge">{item.type.toUpperCase()}</span>
-                </p>
-                <p className="content-author">Por: {item.uploaded_by_name}</p>
-                <div className="content-actions">
-                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary">
-                    Ver
-                  </a>
-                </div>
-              </div>
-            ))}
-          </div>
-        )
+        <div className="tc-grid">
+          {filteredContent.map((item) => (
+            <ContentCard key={item.id} item={item} user={user} />
+          ))}
+        </div>
       )}
     </div>
   );

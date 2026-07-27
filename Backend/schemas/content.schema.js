@@ -1,8 +1,23 @@
 import { z } from 'zod';
+import { PLAN_TIERS } from '../utils/plans.js';
 
 export const contentType = z.enum(['video', 'article', 'quiz'], {
   errorMap: () => ({ message: 'Type must be one of: video, article, quiz' }),
 });
+
+export const contentPlanTier = z.enum(
+  [
+    PLAN_TIERS.FREE,
+    PLAN_TIERS.BASICO,
+    PLAN_TIERS.PRO,
+    PLAN_TIERS.MASTER,
+  ],
+  {
+    errorMap: () => ({
+      message: 'Plan tier must be one of: free, basico, pro, master',
+    }),
+  }
+);
 
 const normalizeString = (label) =>
   z
@@ -42,6 +57,7 @@ export const createContent = z.object({
     .max(120, { message: 'Title cannot exceed 120 characters' })
     .transform((value) => value.trim()),
   type: contentType,
+  plan_tier: contentPlanTier.optional(),
   ...bodyOrDescription.shape,
   tags: z.array(optionalTag).optional(),
 });
@@ -77,20 +93,18 @@ export const updateContent = z
   });
 
 export const listContent = z.object({
-  page: z
-    .preprocess((value) => {
-      if (typeof value === 'string' && value.trim() !== '') {
-        return Number(value);
-      }
-      return value;
-    }, z.number().int().min(1, { message: 'Page must be an integer greater than or equal to 1' }).default(1)),
-  limit: z
-    .preprocess((value) => {
-      if (typeof value === 'string' && value.trim() !== '') {
-        return Number(value);
-      }
-      return value;
-    }, z.number().int().min(1, { message: 'Limit must be at least 1' }).max(50, { message: 'Limit cannot exceed 50' }).default(20)),
+  page: z.preprocess((value) => {
+    if (typeof value === 'string' && value.trim() !== '') {
+      return Number(value);
+    }
+    return value;
+  }, z.number().int().min(1, { message: 'Page must be an integer greater than or equal to 1' }).default(1)),
+  limit: z.preprocess((value) => {
+    if (typeof value === 'string' && value.trim() !== '') {
+      return Number(value);
+    }
+    return value;
+  }, z.number().int().min(1, { message: 'Limit must be at least 1' }).max(50, { message: 'Limit cannot exceed 50' }).default(20)),
   type: contentType.optional(),
 });
 

@@ -1,5 +1,5 @@
 import prisma from '../utils/prismaClient.js';
-import { canAccessPlan, PLAN_TIERS } from '../utils/plans.js';
+import { canAccessPlan, normalizePlanTier, PLAN_TIERS } from '../utils/plans.js';
 import { formatContent } from '../utils/serializers.js';
 import storage from '../storage/index.js';
 
@@ -28,12 +28,45 @@ const resolveContentUrls = async (items) => {
   );
 };
 
+const resolveEffectiveUserPlanTier = (planTier) => {
+  if (planTier === null || planTier === undefined) {
+    return PLAN_TIERS.FREE;
+  }
+
+  if (typeof planTier !== 'string') {
+    return null;
+  }
+
+  const trimmedPlanTier = planTier.trim();
+  if (!trimmedPlanTier) {
+    return PLAN_TIERS.FREE;
+  }
+
+  return normalizePlanTier(trimmedPlanTier);
+};
+
+const resolveEffectiveContentTier = (contentItem) => {
+  const isFreeValue = contentItem?.is_free ?? contentItem?.isFree;
+  if (isFreeValue === true || isFreeValue === 1 || isFreeValue === '1' || isFreeValue === 'true' || isFreeValue === 'on') {
+    return PLAN_TIERS.FREE;
+  }
+
+  const storedPlanTier = contentItem?.plan_tier ?? contentItem?.planTier;
+  if (typeof storedPlanTier !== 'string') {
+    return null;
+  }
+
+  return normalizePlanTier(storedPlanTier);
+};
+
 const filterContentForUser = (content, access) => {
   if (!access) {
-    return content.filter((item) => (item.plan_tier || 'free') === 'free');
+    return content.filter((item) => canAccessPlan(PLAN_TIERS.FREE, resolveEffectiveContentTier(item)));
   }
   if (access.role === 'admin') return content;
-  return content.filter((item) => canAccessPlan(access.plan_tier, item.plan_tier || 'free'));
+
+  const effectiveUserTier = resolveEffectiveUserPlanTier(access.plan_tier);
+  return content.filter((item) => canAccessPlan(effectiveUserTier, resolveEffectiveContentTier(item)));
 };
 
 export const getContent = async (req, res) => {

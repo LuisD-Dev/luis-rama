@@ -2,11 +2,13 @@ import { useState } from 'react';
 import { useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth.js';
 import { getSafeRedirect } from '../../utils/safeRedirect.js';
+import { AuthLayout } from '../../components/auth/AuthLayout.jsx';
+import { UIIcon } from '../../components/common/Icons.jsx';
 
 export const LoginPage = () => {
   const location = useLocation();
   const [searchParams] = useSearchParams();
-  const redirectParam = searchParams.get('redirect');
+  const redirectParam = searchParams.get('redirect') || searchParams.get('returnTo');
   const reason = searchParams.get('reason');
   const safeRedirect = getSafeRedirect(redirectParam);
 
@@ -46,11 +48,13 @@ export const LoginPage = () => {
   };
 
   return (
-    <div className="auth-page">
-      <div className="auth-container">
-        <div className="auth-card">
+    <AuthLayout
+      title="Bienvenido de vuelta a Teclia."
+      subtitle="Continúa donde lo dejaste y sigue avanzando en tu aprendizaje."
+    >
+      <div className="auth-card">
           <h1>Inicia sesión</h1>
-          <p className="auth-subtitle">Bienvenido de vuelta a Teclia</p>
+          <p className="auth-subtitle">Accede a tu cuenta de estudiante</p>
 
           {reason === 'expired' && (
             <div className="error-message">
@@ -58,7 +62,7 @@ export const LoginPage = () => {
             </div>
           )}
 
-          {error && <div className="error-message">{error}</div>}
+          {error && <div key={error} className="error-message animate-shake">{error}</div>}
 
           <form onSubmit={handleSubmit} className="auth-form">
             <div className="form-group">
@@ -87,9 +91,10 @@ export const LoginPage = () => {
                 <button
                   type="button"
                   className="password-toggle"
+                  aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
                   onClick={() => setShowPassword((prev) => !prev)}
                 >
-                  {showPassword ? '🙈' : '👁️'}
+                  <UIIcon name={showPassword ? 'eyeOff' : 'eye'} size={18} />
                 </button>
               </div>
             </div>
@@ -101,16 +106,15 @@ export const LoginPage = () => {
             </div>
 
             <button type="submit" disabled={loading} className="button button-primary button-block">
-              {loading ? 'Cargando...' : 'Iniciar sesión'}
+              {loading ? <span className="btn-loading"><span className="spinner" /> Cargando…</span> : 'Iniciar sesión'}
             </button>
           </form>
 
           <p className="auth-footer">
             ¿No tienes cuenta? <Link to="/auth/signup">Regístrate como estudiante</Link>
           </p>
-        </div>
       </div>
-    </div>
+    </AuthLayout>
   );
 };
 

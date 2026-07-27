@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Icon } from '../../components/common/Icons.jsx';
+import { Icon, UIIcon } from '../../components/common/Icons.jsx';
 import { useContent } from '../../context/ContentContext.jsx';
 import { adminService } from '../../services/api.js';
 import { useToast } from '../../context/ToastContext.jsx';
@@ -89,7 +89,7 @@ export const AdminContentPage = () => {
             <h2>Todo el contenido</h2>
             <div className="content-filters">
               <button className="button button-ghost small" onClick={() => setShowShortcuts(true)} title="Atajos de teclado" aria-label="Atajos de teclado">
-                ⌨️
+                <UIIcon name="keyboard" size={16} />
               </button>
               {['all','video','pdf','audio','image'].map(f => (
                 <button
