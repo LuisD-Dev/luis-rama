@@ -2,10 +2,13 @@ import express from 'express';
 import validate from '../middleware/validate.js';
 import * as paymentSchemas from '../schemas/payment.schema.js';
 import { createOrReusePayment } from '../services/paymentService.js';
-import { checkout, stripeWebhook } from '../controllers/paymentsController.js';
-import { verifyToken } from '../middleware/auth.js';
+import { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook } from '../controllers/paymentsController.js';
+import { verifyToken, adminOnly } from '../middleware/auth.js';
 
 const router = express.Router();
+
+router.post('/intent', verifyToken, createPaymentIntent);
+router.post('/intent/:id/confirm', verifyToken, adminOnly, confirmPaymentIntent);
 
 router.post(
   '/payment-method',

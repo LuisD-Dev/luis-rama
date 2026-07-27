@@ -37,3 +37,137 @@
 </html>
 
 
+const jwt = require('jsonwebtoken');
+
+const PLAN_PRICES = {
+  basico: 19,
+  pro: 49,
+  master: 99
+};
+
+let prisma;
+try {
+  const { PrismaClient } = require('@prisma/client');
+  prisma = new PrismaClient();
+} catch {
+  prisma = {
+    payment: {
+      create: async () => { throw new Error('Prisma not configured'); },
+      findUnique: async () => { throw new Error('Prisma not configured'); },
+      update: async () => { throw new Error('Prisma not configured'); }
+    },
+    user: {
+      findUnique: async () => { throw new Error('Prisma not configured'); },
+      update: async () => { throw new Error('Prisma not configured'); }
+    },
+    $transaction: async (callback) => callback(prisma)
+  };
+}
+
+function requireJwt(req, res, next) {
+  if (req.user?.id) return next();
+
+  const authHeader = req.headers.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
+    return next();
+  } catch {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+}
+
+async function createPaymentIntent(req, res) {
+  try {
+    const { plan_tier } = req.body || {};
+
+    if (!plan_tier || !PLAN_PRICES[plan_tier]) {
+      return res.status(400).json({ error: 'invalid_plan' });
+    }
+
+    if (!req.user?.id) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'admin_not_allowed' });
+    }
+
+    const payment = await prisma.payment.create({
+      data: {
+        userId: req.user.id,
+        planTier: plan_tier,
+        amount: PLAN_PRICES[plan_tier],
+        currency: 'USD',
+        status: 'pending'
+      }
+    });
+
+    return res.status(201).json({
+      paymentId: payment.id,
+      status: payment.status,
+      plan_tier: payment.planTier,
+      amount: payment.amount
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+}
+
+async function confirmPaymentIntent(req, res) {
+  // Temporary simulation. Replace with Stripe webhooks later.
+  try {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const { id } = req.params;
+    const payment = await prisma.payment.findUnique({ where: { id } });
+
+    if (!payment) {
+      return res.status(404).json({ error: 'payment_not_found' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const updatedPayment = await tx.payment.update({
+        where: { id },
+        data: { status: 'completed' }
+      });
+
+      const currentUser = await tx.user.findUnique({ where: { id: payment.userId } });
+      if (!currentUser) throw new Error('user_not_found');
+
+      await tx.user.update({
+        where: { id: payment.userId },
+        data: {
+          planTier: payment.planTier,
+          role: currentUser.role === 'admin' ? 'admin' : 'user'
+        }
+      });
+
+      return updatedPayment;
+    });
+
+    return res.json({
+      paymentId: result.id,
+      status: result.status,
+      plan_tier: result.planTier,
+      amount: result.amount
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+}
+
+module.exports = {
+  prisma,
+  requireJwt,
+  createPaymentIntent,
+  confirmPaymentIntent
+};
