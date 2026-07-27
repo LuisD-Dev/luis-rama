@@ -19,6 +19,7 @@ model User {
   planTier          String?   @map("plan_tier")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
+  payments          Payment[]
 
   @@map("users")
 }
@@ -43,4 +44,20 @@ model SiteStat {
   value Int    @default(0)
 
   @@map("site_stats")
+}
+
+model Payment {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int      @map("user_id")
+  planTier  String   @map("plan_tier")
+  amount    Float
+  status    String   @default("pending")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([planTier])
+  @@map("payments")
 }

@@ -125,12 +125,19 @@ export const getAdminStats = async (req, res) => {
 
   const pendingRequests = 0; // Placeholder — implement when a requests model exists
 
-  // Revenue — placeholder, implement when payments are tracked
-  const revenueThisMonth = 0;
-  const revenueLastMonth = 0;
+  // Revenue is now computed from completed payment records only.
+  // Use `paidAt` when available, otherwise fallback to `createdAt`.
+  const revenueThisMonth = sumCompletedPaymentsForCurrentMonth();
+  const revenueLastMonth = sumCompletedPaymentsForPreviousMonth();
   const revenueChange = revenueLastMonth > 0
-    ? Math.round(((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100)
-    : 0;
+    ? Number((((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100).toFixed(2))
+    : (revenueThisMonth > 0 ? 100 : 0);
+
+  const activeSubscriptions = {
+    basico: countUsersWhoseLatestCompletedPaymentIs('basico'),
+    pro: countUsersWhoseLatestCompletedPaymentIs('pro'),
+    master: countUsersWhoseLatestCompletedPaymentIs('master'),
+  };
 
   res.json({
     totalStudents,
@@ -139,13 +146,21 @@ export const getAdminStats = async (req, res) => {
     activeCourses,
     newRegistrations,
     pendingRequests,
-    revenue: {
-      thisMonth: revenueThisMonth,
-      change: revenueChange,
-    },
+    revenueThisMonth,
+    revenueLastMonth,
+    revenueChange,
+    activeSubscriptions,
+    currency: 'USD',
   });
 };
 ```
+
+Implementation status in this repository:
+
+- `GET /api/admin/stats` is implemented in `controllers/statsController.js` and protected by `verifyToken` + `adminOnly`.
+- Revenue metrics are calculated from `Payment` records with `status = 'completed'` only.
+- Month-over-month comparison is based on current month vs previous month boundaries.
+- Active subscriptions are grouped by plan tier from each user's latest completed payment.
 
 **Mount in `app.js` (or `server.js`):**
 ```javascript

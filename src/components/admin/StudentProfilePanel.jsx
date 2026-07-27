@@ -62,8 +62,8 @@ export const StudentProfilePanel = ({ student, onClose }) => {
 
           <div className="student-profile-section">
             <h4>Cursos y asignaciones</h4>
-            <InfoRow label="Cursos inscritos" value={student.enrolled_courses_count ?? (student.enrolled_courses || []).length || '—'} />
-            <InfoRow label="Profesores asignados" value={student.assigned_teachers_count ?? (student.assigned_teachers || []).length || '—'} />
+            <InfoRow label="Cursos inscritos" value={(student.enrolled_courses_count ?? (student.enrolled_courses || []).length) || '—'} />
+            <InfoRow label="Profesores asignados" value={(student.assigned_teachers_count ?? (student.assigned_teachers || []).length) || '—'} />
             <InfoRow label="Tareas completadas" value={student.completed_assignments ?? '—'} />
             <InfoRow label="Asistencia" value={student.attendance_rate ? `${student.attendance_rate}%` : '—'} />
           </div>

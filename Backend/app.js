@@ -8,6 +8,7 @@ import { globalLimiter } from './middleware/rateLimiter.js';
 import authRoutes from './routes/auth.js';
 import contentRoutes from './routes/content.js';
 import statsRoutes from './routes/stats.js';
+import adminRoutes from './routes/admin.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +36,7 @@ if (process.env.LOCAL_UPLOADS === 'true') {
 app.use('/api/auth', authRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'Teclia Backend is running' });

@@ -210,6 +210,34 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ----
 
+**Admin routes** (`/api/admin`)
+
+- GET /api/admin/stats
+  - Description: Admin-only dashboard metrics with payment-based revenue and active subscriptions by tier.
+  - Auth required: Yes
+  - Role: admin only
+  - Revenue source: only `completed` payment records from `payments` table.
+  - Response example:
+
+```json
+{
+  "pageVisits": 123,
+  "studentCount": 42,
+  "revenueThisMonth": 180.0,
+  "revenueLastMonth": 40.0,
+  "revenueChange": 350,
+  "activeSubscriptions": {
+    "basico": 10,
+    "pro": 6,
+    "master": 2,
+    "total": 18
+  },
+  "currency": "USD"
+}
+```
+
+----
+
 Notes and mapping
 
 - The API endpoints in this documentation correspond to the server code under `Backend/routes`.
