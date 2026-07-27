@@ -8,6 +8,7 @@ import { globalLimiter } from './middleware/rateLimiter.js';
 import authRoutes from './routes/auth.js';
 import contentRoutes from './routes/content.js';
 import statsRoutes from './routes/stats.js';
+import adminRoutes from './routes/admin.js';
 import paymentsRoutes from './routes/payments.js';
 import webhooksRoutes from './routes/webhooks.js';
 
@@ -42,6 +43,7 @@ if (process.env.LOCAL_UPLOADS === 'true') {
 app.use('/api/auth', authRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/payments', paymentsRoutes);
 
 app.get('/api/health', (_req, res) => {

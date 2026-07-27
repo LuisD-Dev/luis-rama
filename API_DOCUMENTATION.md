@@ -210,6 +210,32 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ----
 
+**Admin routes** (`/api/admin`)
+
+- GET /api/admin/stats
+  - Description: Admin-only dashboard metrics with payment-based revenue and active subscriptions by tier.
+  - Auth required: Yes
+  - Role: admin only
+  - Revenue source: only `completed` payment records from `payments` table.
+  - Response example:
+
+```json
+{
+  "pageVisits": 123,
+  "studentCount": 42,
+  "revenueThisMonth": 180.0,
+  "revenueLastMonth": 40.0,
+  "revenueChange": 350,
+  "activeSubscriptions": {
+    "basico": 10,
+    "pro": 6,
+    "master": 2,
+    "total": 18
+  },
+  "currency": "USD"
+}
+```
+
 **Payments routes** (`/api/payments`)
 
 - POST /api/payments/checkout
@@ -297,7 +323,6 @@ Created/activated inside `markPaymentCompleted` in the same transaction that set
 | `outcome` | String? | `processing` \| `processed` \| `duplicate` \| `failed` \| `ignored` |
 
 Migrations: forward `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`, reverse `.../down.sql` (also mirrored under `Backend/db/migrations/`).
-
 ----
 
 Notes and mapping

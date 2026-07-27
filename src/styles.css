@@ -1022,6 +1022,23 @@ h1 {
   color: #d3d3d3;
 }
 
+.stats-error {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.stats-error p {
+  margin: 0;
+  color: #ffd0d0;
+}
+
 .recent-list {
   display: grid;
   gap: 1rem;
