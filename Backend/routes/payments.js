@@ -2,7 +2,7 @@ import express from 'express';
 import validate from '../middleware/validate.js';
 import * as paymentSchemas from '../schemas/payment.schema.js';
 import { createOrReusePayment } from '../services/paymentService.js';
-import { checkout, createPaymentIntent, confirmPaymentIntent } from '../controllers/paymentsController.js';
+import { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook } from '../controllers/paymentsController.js';
 import { verifyToken, adminOnly } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -45,5 +45,10 @@ router.post(
   validate(paymentSchemas.createCheckout),
   checkout
 );
+
+// No verifyToken/validate: Stripe calls this directly and body must stay raw
+// (see express.raw() mounted ahead of express.json() in app.js) so the
+// stripe-signature header can be verified against the exact bytes sent.
+router.post('/webhook', stripeWebhook);
 
 export default router;
