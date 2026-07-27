@@ -2,7 +2,7 @@
 
 Teclia Academia is a small learning platform combining a React + Vite frontend with an Express backend for authentication, content management and basic usage statistics.
 
-This repository contains the full-stack code (frontend in the repository root and backend under `Backend/`). The backend supports either local SQLite (default) or PostgreSQL/Supabase.
+This repository contains the full-stack code (frontend in the repository root and backend under `Backend/`). The backend supports either local SQLite (default) or PostgreSQL/Supabase..
 
 **Quick links**
 
