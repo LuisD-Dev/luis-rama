@@ -1,9 +1,16 @@
 import { useState } from 'react';
 import { Icon } from '../common/Icons.jsx';
 import { planLabel } from '../../utils/plans.js';
+import { useContent } from '../../context/ContentContext.jsx';
 
 export const ContentGrid = ({ content, onDelete, isAdmin = false }) => {
   const [filter, setFilter] = useState('all');
+  const { error, openContent } = useContent();
+
+  const handleOpen = (event, item) => {
+    event.preventDefault();
+    openContent(item);
+  };
 
   const filteredContent = filter === 'all'
     ? content
@@ -27,6 +34,8 @@ export const ContentGrid = ({ content, onDelete, isAdmin = false }) => {
           ))}
         </div>
       </div>
+
+      {error && <div className="error-message" role="alert">{error}</div>}
 
       {filteredContent.length === 0 ? (
         <div className="empty-state">
@@ -59,9 +68,9 @@ export const ContentGrid = ({ content, onDelete, isAdmin = false }) => {
                     </td>
                     <td><span className="badge small">{item.type.toUpperCase()}</span></td>
                     <td>{item.uploaded_by_name}</td>
-                    <td><span className="badge small">{planLabel(item.plan_tier || (item.is_free ? 'free' : 'basico'))}</span></td>
+                    <td><span className="badge small">{planLabel(item.plan_tier || 'basico')}</span></td>
                     <td className="td-actions">
-                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
+                      <a href={item.url} onClick={(event) => handleOpen(event, item)} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
                       <button onClick={() => onDelete(item.id)} className="button button-danger small">Eliminar</button>
                     </td>
                   </tr>
@@ -81,7 +90,7 @@ export const ContentGrid = ({ content, onDelete, isAdmin = false }) => {
                 </p>
                 <p className="content-author">Por: {item.uploaded_by_name}</p>
                 <div className="content-actions">
-                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary">
+                  <a href={item.url} onClick={(event) => handleOpen(event, item)} target="_blank" rel="noopener noreferrer" className="button button-secondary">
                     Ver
                   </a>
                 </div>

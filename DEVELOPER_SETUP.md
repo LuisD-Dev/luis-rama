@@ -53,11 +53,14 @@ cp ../.env.example .env
 # On Windows PowerShell: copy ../.env.example .env
 ```
 
-- Edit `Backend/.env` and set values for `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `JWT_SECRET`, `SENDGRID_API_KEY` (for emails), and `DATABASE_URL` (if using Postgres). See `.env.example` for descriptions for each variable.
+- Edit `Backend/.env` and set values for `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `JWT_SECRET`, `SENDGRID_API_KEY` (for emails), and `DATABASE_URL` (if using Postgres). When `LOCAL_UPLOADS=true`, also set a separate, long random `MEDIA_SIGNING_SECRET`. See `.env.example` for descriptions for each variable.
 
 Notes:
 - If you do not set `DATABASE_URL`, the backend will use a local SQLite file (default) created under `Backend/`.
 - The backend will fall back to a development `JWT_SECRET` if none is provided, but you should set `JWT_SECRET` for real development or production.
+- `CONTENT_SIGNED_URL_TTL_SECONDS` controls paid-content URL lifetime and defaults to 900 seconds. The backend constrains it to 300-900 seconds.
+- Do not reuse `JWT_SECRET` as `MEDIA_SIGNING_SECRET`; rotating one secret should not invalidate both authentication and media URLs.
+- Local storage keys may contain decoded spaces and Unicode characters, but must not contain a literal `%` followed by two hexadecimal characters. Local uploads already normalize filenames to UUID-based keys; custom/imported keys must apply the same policy so residual URL encoding cannot be mistaken for a real filename.
 
 ## 7) Running the project locally
 
@@ -138,6 +141,10 @@ If you prefer to use Supabase for storage and/or Postgres hosting:
 - Create a Supabase project and a storage bucket (default bucket name in this project: `uploads`).
 - Copy `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` into your `Backend/.env`.
 - Ensure `SUPABASE_SERVICE_KEY` is the service-role key (required for server-side uploads/deletes).
+- Configure paid-content objects in a **private** bucket. `createSignedUrl` limits access only when the underlying object is not also publicly readable. The service-role key stays on the backend and is used to create short-lived URLs after the plan check succeeds.
+- If free objects must remain permanently public, store them under a separately public storage policy/bucket; never make the bucket containing paid objects public.
+
+> **Security warning:** a signed URL does not protect an object that is also publicly readable. Never configure the bucket or storage policy containing paid content for public access.
 - If you want the backend DB to target Supabase Postgres, set `DATABASE_URL` to the Supabase Postgres connection string.
 
 ## 9) Database initialization, migrations and seed data
@@ -148,6 +155,8 @@ If you prefer to use Supabase for storage and/or Postgres hosting:
 - There is a `npm run migrate:postgres` script in `Backend/package.json` intended for migration helpers; inspect the script before running.
 
 ## 10) Common setup errors and fixes
+
+- "MEDIA_SIGNING_SECRET must be defined" — Set a long random server-side secret when `LOCAL_UPLOADS=true`. Rotating it invalidates previously issued local media URLs.
 
 - "SUPABASE_URL and SUPABASE_SERVICE_KEY must be defined" — Copy `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` into `Backend/.env` or remove Supabase-dependent calls if you are working purely with local uploads.
 - "No token provided" or 401 responses — Ensure `JWT_SECRET` is set in `Backend/.env` and that you include `Authorization: Bearer <token>` in requests that require authentication.
