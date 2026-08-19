@@ -188,6 +188,21 @@ router.get('/stats', verifyToken, adminOnly, getAdminStats);
 export default router;
 ```
 
+### 1.4 Payment completion status semantics
+
+The frontend must use the canonical `status` returned by `POST /api/payments/payment-method`; an HTTP 200 response alone is not proof of completed payment.
+
+| Payment status | Frontend behavior |
+|---|---|
+| `succeeded` | Show completed-payment UX |
+| `pending` | Show a neutral processing state; do not show completion |
+| `processing` | Show a neutral processing state; do not show completion |
+| `failed` | Show failure UI |
+| `canceled` | Show cancellation/failure UI |
+| unknown or missing | Fail closed; never show success |
+
+The current application has no payment polling/status retrieval endpoint. A screen that receives `pending` or `processing` therefore does not automatically advance to `succeeded` without another navigation or refresh mechanism.
+
 ---
 
 ## 2. Database Model Changes
