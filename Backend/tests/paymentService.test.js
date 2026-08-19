@@ -8,6 +8,7 @@ import {
   processPaymentIntentWebhookEvent,
   activateOneTimePaymentEntitlement,
   markPaymentCompleted,
+  markPaymentProcessed,
   recordPaymentEvent,
   InvalidPlanError,
   PaymentIdempotencyConflictError,
@@ -17,7 +18,10 @@ import {
   StripePaymentIntentError,
   StripePaymentRequestError,
 } from '../services/paymentService.js';
-import { PAYMENT_STATUSES } from '../services/paymentStateMachine.js';
+import {
+  PAYMENT_STATUSES,
+  PaymentTransitionError,
+} from '../services/paymentStateMachine.js';
 
 setupTestDb();
 
@@ -62,6 +66,53 @@ describe('paymentService', () => {
     expect(payment.metadata).toContain('unit');
   });
 
+  test('createPaymentIntent initializes created then transitions to pending', async () => {
+    const statusWrites = [];
+    let row = null;
+    const paymentClient = {
+      findUnique: jest.fn(async ({ where }) => {
+        if (!row) return null;
+        if (where.id != null && where.id !== row.id) return null;
+        if (where.idempotencyKey != null && where.idempotencyKey !== row.idempotencyKey) {
+          return null;
+        }
+        return { ...row };
+      }),
+      create: jest.fn(async ({ data }) => {
+        statusWrites.push(data.status);
+        row = { id: 75, ...data };
+        return { ...row };
+      }),
+      updateMany: jest.fn(async ({ where, data }) => {
+        if (row.id !== where.id || row.status !== where.status) return { count: 0 };
+        statusWrites.push(data.status);
+        row = { ...row, ...data };
+        return { count: 1 };
+      }),
+    };
+    const db = {
+      payment: paymentClient,
+      $transaction: jest.fn(async (callback) => callback({ payment: paymentClient })),
+    };
+
+    const result = await createPaymentIntent(
+      {
+        userId,
+        planTier: 'basico',
+        amount: 999,
+        idempotencyKey: 'service-created-pending',
+      },
+      { db }
+    );
+
+    expect(result.status).toBe(PAYMENT_STATUSES.PENDING);
+    expect(statusWrites).toEqual([
+      PAYMENT_STATUSES.CREATED,
+      PAYMENT_STATUSES.PENDING,
+    ]);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
   test('createPaymentIntent returns existing row for duplicate idempotencyKey', async () => {
     const key = `dup-intent-${Date.now()}`;
     const first = await createPaymentIntent({
@@ -93,7 +144,7 @@ describe('paymentService', () => {
     ).rejects.toBeInstanceOf(InvalidPlanError);
   });
 
-  test('markPaymentCompleted sets status to completed', async () => {
+  test('markPaymentCompleted converges pending through processing to succeeded', async () => {
     const payment = await createPaymentIntent({
       userId,
       planTier: 'master',
@@ -107,7 +158,30 @@ describe('paymentService', () => {
       subscriptionExternalId: 'sub_complete_1',
     });
 
-    expect(updated.status).toBe('completed');
+    expect(updated.status).toBe('succeeded');
+  });
+
+  test.each([
+    { initialStatus: 'created', label: 'created through pending and processing' },
+    { initialStatus: 'processing', label: 'processing directly' },
+  ])('markPaymentCompleted converges $label to succeeded', async ({ initialStatus }) => {
+    const payment = await prisma.payment.create({
+      data: {
+        userId,
+        planTier: 'pro',
+        amount: 2499,
+        status: initialStatus,
+        idempotencyKey: `complete-${initialStatus}-${Date.now()}`,
+      },
+    });
+
+    const result = await markPaymentCompleted({
+      paymentId: payment.id,
+      subscriptionExternalId: `sub_complete_${initialStatus}_${payment.id}`,
+    });
+
+    expect(result.payment.status).toBe('succeeded');
+    expect(result.alreadyCompleted).toBe(false);
   });
 
   test('markPaymentCompleted creates an active subscription', async () => {
@@ -148,7 +222,7 @@ describe('paymentService', () => {
     expect(user.role).toBe('premium');
   });
 
-  test('second markPaymentCompleted is idempotent', async () => {
+  test('second markPaymentCompleted is idempotent and invokes entitlement exactly once', async () => {
     const payment = await createPaymentIntent({
       userId,
       planTier: 'pro',
@@ -156,18 +230,23 @@ describe('paymentService', () => {
       idempotencyKey: `idem-complete-${Date.now()}`,
     });
 
-    const first = await markPaymentCompleted({
+    const entitlementWriter = jest.fn(async (tx, { payment: succeededPayment }) =>
+      tx.user.update({
+        where: { id: succeededPayment.userId },
+        data: { planTier: succeededPayment.planTier, role: 'premium' },
+      })
+    );
+    const completion = {
       paymentId: payment.id,
       subscriptionExternalId: `sub_idem_${payment.id}`,
-    });
-    const second = await markPaymentCompleted({
-      paymentId: payment.id,
-      subscriptionExternalId: `sub_idem_${payment.id}`,
-    });
+    };
+    const first = await markPaymentCompleted(completion, { entitlementWriter });
+    const second = await markPaymentCompleted(completion, { entitlementWriter });
 
     expect(first.alreadyCompleted).toBe(false);
     expect(second.alreadyCompleted).toBe(true);
-    expect(second.payment.status).toBe('completed');
+    expect(second.payment.status).toBe('succeeded');
+    expect(entitlementWriter).toHaveBeenCalledTimes(1);
 
     const payments = await prisma.payment.findMany({ where: { id: payment.id } });
     expect(payments).toHaveLength(1);
@@ -176,6 +255,102 @@ describe('paymentService', () => {
       where: { type: 'payment.completed', paymentId: payment.id },
     });
     expect(completedEvents).toHaveLength(1);
+  });
+
+  test.each([
+    { status: 'succeeded', label: 'canonical succeeded' },
+    { status: 'completed', label: 'legacy completed' },
+    { status: 'processed', label: 'legacy processed' },
+  ])('treats $label as already successful without entitlement rewrite', async ({ status }) => {
+    const payment = await prisma.payment.create({
+      data: {
+        userId,
+        planTier: 'master',
+        amount: 4999,
+        status,
+        idempotencyKey: `already-success-${status}-${Date.now()}`,
+      },
+    });
+    const entitlementWriter = jest.fn();
+
+    const result = await markPaymentCompleted(
+      { paymentId: payment.id },
+      { entitlementWriter }
+    );
+
+    expect(result).toMatchObject({ alreadyCompleted: true });
+    expect(result.payment.status).toBe(status);
+    expect(entitlementWriter).not.toHaveBeenCalled();
+  });
+
+  test.each(['failed', 'canceled'])(
+    'does not resurrect a %s Payment',
+    async (status) => {
+      const payment = await prisma.payment.create({
+        data: {
+          userId,
+          planTier: 'pro',
+          amount: 2499,
+          status,
+          idempotencyKey: `terminal-${status}-${Date.now()}`,
+        },
+      });
+      const entitlementWriter = jest.fn();
+
+      await expect(
+        markPaymentCompleted({ paymentId: payment.id }, { entitlementWriter })
+      ).rejects.toBeInstanceOf(PaymentTransitionError);
+
+      const unchanged = await prisma.payment.findUnique({ where: { id: payment.id } });
+      expect(unchanged.status).toBe(status);
+      expect(entitlementWriter).not.toHaveBeenCalled();
+    }
+  );
+
+  test('markPaymentProcessed compatibility wrapper produces succeeded', async () => {
+    const payment = await createPaymentIntent({
+      userId,
+      planTier: 'basico',
+      amount: 999,
+      idempotencyKey: `processed-wrapper-${Date.now()}`,
+    });
+
+    const updated = await markPaymentProcessed({ paymentId: payment.id });
+
+    expect(updated.status).toBe('succeeded');
+  });
+
+  test('rolls back succeeded when entitlement persistence fails', async () => {
+    const payment = await createPaymentIntent({
+      userId,
+      planTier: 'pro',
+      amount: 2499,
+      idempotencyKey: `rollback-completion-${Date.now()}`,
+    });
+    const entitlementFailure = new Error('forced entitlement failure');
+
+    await expect(
+      markPaymentCompleted(
+        {
+          paymentId: payment.id,
+          subscriptionExternalId: `sub_rollback_${payment.id}`,
+        },
+        { entitlementWriter: jest.fn().mockRejectedValue(entitlementFailure) }
+      )
+    ).rejects.toBe(entitlementFailure);
+
+    const unchanged = await prisma.payment.findUnique({ where: { id: payment.id } });
+    expect(unchanged.status).toBe('pending');
+    expect(
+      await prisma.subscription.findUnique({
+        where: {
+          provider_externalId: {
+            provider: 'stripe',
+            externalId: `sub_rollback_${payment.id}`,
+          },
+        },
+      })
+    ).toBeNull();
   });
 
   test('recordPaymentEvent persists payload and ignores duplicate idempotencyKey', async () => {

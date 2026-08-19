@@ -5,6 +5,7 @@ import prisma from '../utils/prismaClient.js';
 import { PLAN_TIERS, normalizePlanTier } from '../utils/plans.js';
 import {
   PAYMENT_STATUSES,
+  PaymentTransitionError,
   applyTransition,
   createPaymentInPendingState,
 } from './paymentStateMachine.js';
@@ -148,6 +149,22 @@ export class StripePaymentIntentError extends PaymentServiceError {
   }
 }
 
+export class StripeCheckoutRequestError extends PaymentServiceError {
+  constructor(cause, { retryable }) {
+    super('Stripe Checkout Session request failed', {
+      statusCode: 502,
+      clientMessage: 'Unable to start checkout. Please try again.',
+    });
+    this.name = 'StripeCheckoutRequestError';
+    this.code = retryable
+      ? 'PAYMENT_PROVIDER_UNAVAILABLE'
+      : 'STRIPE_CHECKOUT_REJECTED';
+    this.retryable = retryable;
+    this.providerResponded = cause?.providerResponded === true;
+    this.cause = cause;
+  }
+}
+
 const getStripeSecret = () => process.env.STRIPE_SECRET_KEY || '';
 
 let cachedStripeClient = null;
@@ -213,6 +230,32 @@ const mapStripeSubscriptionStatus = (stripeStatus) => {
   }
 };
 
+class StripeHttpResponseError extends Error {
+  constructor(httpStatus, stripeError) {
+    super('Stripe rejected the API request');
+    this.name = 'StripeHttpResponseError';
+    this.providerResponded = true;
+    this.authoritativeFailure = true;
+    this.httpStatus = httpStatus;
+    this.stripeError = stripeError;
+    this.error = stripeError?.error;
+    this.payment_intent = stripeError?.payment_intent;
+    this.retryable = false;
+  }
+}
+
+class StripeUnusableResponseError extends Error {
+  constructor(httpStatus, stripeError) {
+    super('Stripe returned an unusable success response');
+    this.name = 'StripeUnusableResponseError';
+    this.providerResponded = true;
+    this.authoritativeFailure = false;
+    this.httpStatus = httpStatus;
+    this.stripeError = stripeError;
+    this.retryable = true;
+  }
+}
+
 const stripeRequest = ({ path, method = 'POST', body, idempotencyKey }) =>
   new Promise((resolve, reject) => {
     const data = new URLSearchParams(body).toString();
@@ -236,15 +279,28 @@ const stripeRequest = ({ path, method = 'POST', body, idempotencyKey }) =>
         raw += chunk;
       });
       res.on('end', () => {
+        const isSuccessfulResponse =
+          res.statusCode && res.statusCode >= 200 && res.statusCode < 300;
         try {
           const parsed = JSON.parse(raw);
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          if (isSuccessfulResponse) {
             resolve(parsed);
           } else {
-            reject(parsed);
+            reject(new StripeHttpResponseError(res.statusCode, parsed));
           }
         } catch (err) {
-          reject(err);
+          if (isSuccessfulResponse) {
+            // Stripe may have created the remote object even though its success
+            // response was unusable locally, so this remains ambiguous.
+            err.providerResponded = true;
+            err.authoritativeFailure = false;
+            err.httpStatus = res.statusCode;
+            err.stripeError = raw;
+            err.retryable = true;
+            reject(err);
+          } else {
+            reject(new StripeHttpResponseError(res.statusCode, raw));
+          }
         }
       });
     });
@@ -284,20 +340,23 @@ const paymentInitializationMeta = ({ source, actorType, actorId, reason }) => ({
 /**
  * Persist a pending payment intent row. Idempotent on `idempotencyKey`.
  */
-export async function createPaymentIntent({
-  userId,
-  planTier,
-  amount,
-  currency = 'usd',
-  provider = 'stripe',
-  externalId = null,
-  idempotencyKey,
-  metadata = null,
-  paymentMethodId = null,
-  stripePaymentIntentId = null,
-  stripeCheckoutSessionId = null,
-  tx = prisma,
-} = {}) {
+export async function createPaymentIntent(
+  {
+    userId,
+    planTier,
+    amount,
+    currency = 'usd',
+    provider = 'stripe',
+    externalId = null,
+    idempotencyKey,
+    metadata = null,
+    paymentMethodId = null,
+    stripePaymentIntentId = null,
+    stripeCheckoutSessionId = null,
+    tx,
+  } = {},
+  { db = prisma } = {}
+) {
   if (!idempotencyKey) {
     throw new PaymentServiceError('idempotencyKey required', {
       statusCode: 400,
@@ -309,12 +368,13 @@ export async function createPaymentIntent({
   const amountCents =
     typeof amount === 'number' ? amount : PLAN_AMOUNTS[normalizedPlan] ?? 0;
 
-  const existing = await tx.payment.findUnique({ where: { idempotencyKey } });
-  if (existing) return existing;
+  const createOrLoad = async (client) => {
+    const existing = await client.payment.findUnique({ where: { idempotencyKey } });
+    if (existing) return existing;
 
-  try {
-    return await tx.payment.create({
-      data: {
+    return createPaymentInPendingState(
+      client,
+      {
         userId,
         amount: amountCents,
         currency,
@@ -326,15 +386,25 @@ export async function createPaymentIntent({
         stripeCheckoutSessionId,
         idempotencyKey,
         metadata: serializeMetadata(metadata),
-        status: 'pending',
       },
-    });
-  } catch (err) {
-    if (err?.code === 'P2002') {
-      const raced = await tx.payment.findUnique({ where: { idempotencyKey } });
-      if (raced) return raced;
-    }
-    throw err;
+      paymentInitializationMeta({
+        source: provider === 'simulated' ? 'simulated_payment_api' : 'payment_service',
+        actorType: 'system',
+        actorId: userId,
+        reason: 'payment initialized',
+      })
+    );
+  };
+
+  if (tx) return createOrLoad(tx);
+
+  try {
+    return await db.$transaction(createOrLoad);
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
+    const raced = await db.payment.findUnique({ where: { idempotencyKey } });
+    if (raced) return raced;
+    throw error;
   }
 }
 
@@ -421,20 +491,88 @@ const resolvePayment = async (tx, { paymentId, idempotencyKey, externalId }) => 
   return null;
 };
 
+const LEGACY_SUCCESS_PAYMENT_STATUSES = new Set(['completed', 'processed']);
+
+const nextCanonicalSuccessStatus = (status) => {
+  switch (status) {
+    case PAYMENT_STATUSES.CREATED:
+      return PAYMENT_STATUSES.PENDING;
+    case PAYMENT_STATUSES.PENDING:
+      return PAYMENT_STATUSES.PROCESSING;
+    case PAYMENT_STATUSES.PROCESSING:
+      return PAYMENT_STATUSES.SUCCEEDED;
+    default:
+      return null;
+  }
+};
+
+const convergePaymentToSucceeded = async (tx, payment, meta) => {
+  let current = payment;
+
+  for (let step = 0; step < 4; step += 1) {
+    if (current.status === PAYMENT_STATUSES.SUCCEEDED) {
+      return { payment: current, wonSucceededTransition: false, outcome: 'already_succeeded' };
+    }
+    if (LEGACY_SUCCESS_PAYMENT_STATUSES.has(current.status)) {
+      return {
+        payment: current,
+        wonSucceededTransition: false,
+        outcome: 'legacy_already_succeeded',
+      };
+    }
+
+    const targetStatus = nextCanonicalSuccessStatus(current.status);
+    if (!targetStatus) {
+      throw new PaymentTransitionError(current.status, PAYMENT_STATUSES.SUCCEEDED, {
+        paymentId: current.id,
+        currentStatus: current.status,
+      });
+    }
+
+    const transition = await applyTransition(tx, current.id, targetStatus, meta);
+    current = transition.payment;
+
+    const wonSucceededTransition =
+      transition.applied === true &&
+      transition.previousStatus === PAYMENT_STATUSES.PROCESSING &&
+      transition.targetStatus === PAYMENT_STATUSES.SUCCEEDED;
+    if (wonSucceededTransition) {
+      return { payment: current, wonSucceededTransition: true, outcome: 'processed' };
+    }
+  }
+
+  throw new PaymentTransitionError(current.status, PAYMENT_STATUSES.SUCCEEDED, {
+    paymentId: current.id,
+    currentStatus: current.status,
+  });
+};
+
+const activateCompletedPaymentEntitlement = (tx, { payment }) =>
+  tx.user.update({
+    where: { id: payment.userId },
+    data: {
+      planTier: payment.planTier,
+      role: 'premium',
+    },
+  });
+
 /**
  * Mark a payment completed and activate the user's subscription/plan in one transaction.
  */
-export async function markPaymentCompleted({
-  paymentId,
-  idempotencyKey,
-  externalId,
-  subscriptionExternalId,
-  currentPeriodStart,
-  currentPeriodEnd,
-  eventPayload = null,
-  eventIdempotencyKey = null,
-} = {}) {
-  return prisma.$transaction(async (tx) => {
+export async function markPaymentCompleted(
+  {
+    paymentId,
+    idempotencyKey,
+    externalId,
+    subscriptionExternalId,
+    currentPeriodStart,
+    currentPeriodEnd,
+    eventPayload = null,
+    eventIdempotencyKey = null,
+  } = {},
+  { db = prisma, entitlementWriter = activateCompletedPaymentEntitlement } = {}
+) {
+  return db.$transaction(async (tx) => {
     const payment = await resolvePayment(tx, {
       paymentId,
       idempotencyKey,
@@ -445,13 +583,19 @@ export async function markPaymentCompleted({
       throw new PaymentNotFoundError();
     }
 
-    if (payment.status === 'completed' || payment.status === 'processed') {
+    const convergence = await convergePaymentToSucceeded(tx, payment, {
+      source: 'payment_completion_service',
+      actorType: 'system',
+      actorId: payment.id,
+      reason: 'payment completion requested',
+    });
+    if (!convergence.wonSucceededTransition) {
       return {
-        payment,
+        payment: convergence.payment,
         subscription: await tx.subscription.findFirst({
           where: {
-            userId: payment.userId,
-            provider: payment.provider,
+            userId: convergence.payment.userId,
+            provider: convergence.payment.provider,
             status: 'active',
           },
           orderBy: { id: 'desc' },
@@ -459,6 +603,8 @@ export async function markPaymentCompleted({
         alreadyCompleted: true,
       };
     }
+
+    const succeededPayment = convergence.payment;
 
     const now = new Date();
     const periodStart = currentPeriodStart
@@ -470,16 +616,15 @@ export async function markPaymentCompleted({
 
     const subExternalId =
       subscriptionExternalId ||
-      payment.externalId ||
-      payment.stripePaymentIntentId ||
-      payment.stripeCheckoutSessionId ||
-      `payment_${payment.id}`;
+      succeededPayment.externalId ||
+      succeededPayment.stripePaymentIntentId ||
+      succeededPayment.stripeCheckoutSessionId ||
+      `payment_${succeededPayment.id}`;
 
     const updatedPayment = await tx.payment.update({
-      where: { id: payment.id },
+      where: { id: succeededPayment.id },
       data: {
-        status: 'completed',
-        externalId: payment.externalId || subExternalId,
+        externalId: succeededPayment.externalId || subExternalId,
         updatedAt: now,
       },
     });
@@ -487,7 +632,7 @@ export async function markPaymentCompleted({
     const existingSub = await tx.subscription.findUnique({
       where: {
         provider_externalId: {
-          provider: payment.provider,
+          provider: succeededPayment.provider,
           externalId: subExternalId,
         },
       },
@@ -497,7 +642,7 @@ export async function markPaymentCompleted({
       ? await tx.subscription.update({
           where: { id: existingSub.id },
           data: {
-            planTier: payment.planTier,
+            planTier: succeededPayment.planTier,
             status: 'active',
             currentPeriodStart: periodStart,
             currentPeriodEnd: periodEnd,
@@ -505,34 +650,28 @@ export async function markPaymentCompleted({
         })
       : await tx.subscription.create({
           data: {
-            userId: payment.userId,
-            planTier: payment.planTier,
+            userId: succeededPayment.userId,
+            planTier: succeededPayment.planTier,
             status: 'active',
-            provider: payment.provider,
+            provider: succeededPayment.provider,
             externalId: subExternalId,
             currentPeriodStart: periodStart,
             currentPeriodEnd: periodEnd,
           },
         });
 
-    await tx.user.update({
-      where: { id: payment.userId },
-      data: {
-        planTier: payment.planTier,
-        role: 'premium',
-      },
-    });
+    await entitlementWriter(tx, { payment: updatedPayment, subscription });
 
     await recordPaymentEvent({
-      paymentId: payment.id,
+      paymentId: succeededPayment.id,
       type: 'payment.completed',
       payload: eventPayload ?? {
-        paymentId: payment.id,
-        planTier: payment.planTier,
+        paymentId: succeededPayment.id,
+        planTier: succeededPayment.planTier,
         subscriptionId: subscription.id,
       },
       idempotencyKey:
-        eventIdempotencyKey || `payment.completed:${payment.id}`,
+        eventIdempotencyKey || `payment.completed:${succeededPayment.id}`,
       outcome: 'processed',
       processedAt: now,
       tx,
@@ -628,27 +767,51 @@ async function handleCheckoutSessionCompleted(tx, session) {
     (metaPaymentId && (await tx.payment.findUnique({ where: { id: metaPaymentId } }))) ||
     (session.id && (await tx.payment.findUnique({ where: { stripeCheckoutSessionId: session.id } })));
 
-  const userId = payment?.userId || Number.parseInt(String(session.client_reference_id || ''), 10) || null;
-  const planTier = payment?.planTier || null;
-
-  if (!userId || !planTier) {
-    return { outcome: 'ignored' };
+  if (!payment) {
+    throw new PaymentWebhookProcessingError(
+      'Checkout completion could not resolve a local Payment',
+      { code: 'CHECKOUT_PAYMENT_NOT_FOUND' }
+    );
   }
 
+  let convergence;
+  try {
+    convergence = await convergePaymentToSucceeded(tx, payment, {
+      source: 'stripe_checkout_webhook',
+      actorType: 'system',
+      actorId: session.id,
+      reason: 'checkout.session.completed received from Stripe',
+    });
+  } catch (error) {
+    if (!(error instanceof PaymentTransitionError)) throw error;
+    throw new PaymentWebhookProcessingError(
+      `Checkout success cannot transition Payment ${payment.id} from ${payment.status}`,
+      { code: 'CHECKOUT_PAYMENT_STATE_CONFLICT', cause: error }
+    );
+  }
+
+  if (!convergence.wonSucceededTransition) {
+    return { outcome: convergence.outcome };
+  }
+
+  const succeededPayment = convergence.payment;
+  const userId = succeededPayment.userId;
+  const planTier = succeededPayment.planTier;
   const beforeUser = await tx.user.findUnique({ where: { id: userId } });
   if (!beforeUser) {
-    return { outcome: 'ignored' };
+    throw new PaymentWebhookProcessingError(
+      `Checkout completion user ${userId} was not found`,
+      { code: 'CHECKOUT_USER_NOT_FOUND' }
+    );
   }
+
+  await tx.payment.update({
+    where: { id: succeededPayment.id },
+    data: { externalId: session.subscription },
+  });
 
   if (session.customer && beforeUser.stripeCustomerId !== session.customer) {
     await tx.user.update({ where: { id: userId }, data: { stripeCustomerId: session.customer } });
-  }
-
-  if (payment && payment.status !== 'completed') {
-    await tx.payment.update({
-      where: { id: payment.id },
-      data: { status: 'completed', externalId: session.subscription },
-    });
   }
 
   const now = new Date();
@@ -1732,7 +1895,14 @@ export async function createOrReusePayment({
  * Create a Stripe Checkout Session for the given plan and persist a pending Payment.
  * @returns {{ checkoutUrl: string, sessionId: string, payment: object }}
  */
-export async function createCheckoutSession({ userId, plan }) {
+export async function createCheckoutSession(
+  { userId, plan },
+  {
+    db = prisma,
+    requestCheckout = stripeRequest,
+    transitionPayment = applyTransition,
+  } = {}
+) {
   const normalizedPlan = assertPaidPlan(plan);
   const priceId = resolvePriceId(normalizedPlan);
   if (!priceId) {
@@ -1762,21 +1932,24 @@ export async function createCheckoutSession({ userId, plan }) {
   const idempotencyKey = `checkout_${userId}_${normalizedPlan}_${crypto.randomUUID()}`;
   const stripeSecret = getStripeSecret();
 
-  const payment = await createPaymentIntent({
-    userId,
-    planTier: normalizedPlan,
-    amount,
-    currency: 'usd',
-    provider: 'stripe',
-    idempotencyKey,
-    metadata: { source: 'checkout' },
-  });
+  const payment = await createPaymentIntent(
+    {
+      userId,
+      planTier: normalizedPlan,
+      amount,
+      currency: 'usd',
+      provider: 'stripe',
+      idempotencyKey,
+      metadata: { source: 'checkout' },
+    },
+    { db }
+  );
 
   try {
     if (!stripeSecret && process.env.NODE_ENV === 'test') {
       const sessionId = `cs_test_${payment.id}_${Date.now()}`;
       const checkoutUrl = `https://checkout.stripe.com/c/pay/${sessionId}`;
-      const updated = await prisma.payment.update({
+      const updated = await db.payment.update({
         where: { id: payment.id },
         data: {
           stripeCheckoutSessionId: sessionId,
@@ -1787,19 +1960,8 @@ export async function createCheckoutSession({ userId, plan }) {
     }
 
     if (process.env.NODE_ENV === 'test' && stripeSecret === 'sk_test_force_error') {
-      const simulated = {
+      throw new StripeHttpResponseError(500, {
         error: { type: 'api_error', message: 'Simulated Stripe API failure' },
-      };
-      console.error(
-        { paymentId: payment.id, stripeError: simulated },
-        'Stripe checkout session failed'
-      );
-      await prisma.payment
-        .update({ where: { id: payment.id }, data: { status: 'failed' } })
-        .catch(() => {});
-      throw new PaymentServiceError('Stripe checkout session failed', {
-        statusCode: 502,
-        clientMessage: 'Unable to start checkout. Please try again.',
       });
     }
 
@@ -1814,13 +1976,21 @@ export async function createCheckoutSession({ userId, plan }) {
       'metadata[planTier]': normalizedPlan,
     };
 
-    const session = await stripeRequest({
+    const session = await requestCheckout({
       path: '/v1/checkout/sessions',
       body,
       idempotencyKey,
     });
+    if (
+      typeof session?.id !== 'string' ||
+      !session.id.trim() ||
+      typeof session?.url !== 'string' ||
+      !session.url.trim()
+    ) {
+      throw new StripeUnusableResponseError(200, session);
+    }
 
-    const updated = await prisma.payment.update({
+    const updated = await db.payment.update({
       where: { id: payment.id },
       data: {
         stripeCheckoutSessionId: session.id,
@@ -1853,19 +2023,24 @@ export async function createCheckoutSession({ userId, plan }) {
         paymentId: payment.id,
         userId,
         plan: normalizedPlan,
-        stripeError: err,
+        stripeError: err?.stripeError || err,
         timestamp: new Date().toISOString(),
       },
       'Stripe checkout session failed'
     );
 
-    await prisma.payment
-      .update({ where: { id: payment.id }, data: { status: 'failed' } })
-      .catch(() => {});
+    const authoritativeFailure = err?.authoritativeFailure === true;
+    if (authoritativeFailure) {
+      await transitionPayment(db, payment.id, PAYMENT_STATUSES.FAILED, {
+        source: 'stripe_checkout_api',
+        actorType: 'system',
+        actorId: payment.id,
+        reason: `Stripe rejected Checkout Session creation with HTTP ${err.httpStatus}`,
+      });
+    }
 
-    throw new PaymentServiceError('Stripe checkout session failed', {
-      statusCode: 502,
-      clientMessage: 'Unable to start checkout. Please try again.',
+    throw new StripeCheckoutRequestError(err, {
+      retryable: !authoritativeFailure,
     });
   }
 }
@@ -1896,4 +2071,5 @@ export default {
   PaymentWebhookProcessingError,
   StripePaymentRequestError,
   StripePaymentIntentError,
+  StripeCheckoutRequestError,
 };

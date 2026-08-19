@@ -1,8 +1,13 @@
+import { jest } from '@jest/globals';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../app.js';
 import { setupTestDb } from './helpers/db.setup.js';
 import prisma from '../utils/prismaClient.js';
+import {
+  createCheckoutSession,
+  StripeCheckoutRequestError,
+} from '../services/paymentService.js';
 
 setupTestDb();
 
@@ -125,6 +130,32 @@ describe('POST /api/payments/checkout', () => {
     expect(payment.amount).toBe(2499);
   });
 
+  test('commits the pending Payment before requesting Stripe and then attaches the session id', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_injected_checkout';
+    const requestCheckout = jest.fn(async ({ body }) => {
+      const committed = await prisma.payment.findUnique({
+        where: { id: Number(body['metadata[paymentId]']) },
+      });
+      expect(committed).toMatchObject({
+        userId: testUserId,
+        status: 'pending',
+        stripeCheckoutSessionId: null,
+      });
+      return { id: 'cs_injected_ordering', url: 'https://checkout.stripe.test/order' };
+    });
+
+    const result = await createCheckoutSession(
+      { userId: testUserId, plan: 'pro' },
+      { requestCheckout }
+    );
+
+    expect(requestCheckout).toHaveBeenCalledTimes(1);
+    expect(result.payment).toMatchObject({
+      status: 'pending',
+      stripeCheckoutSessionId: 'cs_injected_ordering',
+    });
+  });
+
   test('Stripe API failure returns safe client message and marks Payment failed', async () => {
     process.env.STRIPE_SECRET_KEY = 'sk_test_force_error';
 
@@ -142,5 +173,52 @@ describe('POST /api/payments/checkout', () => {
     });
     expect(payment).not.toBeNull();
     expect(payment.status).toBe('failed');
+  });
+
+  test('ambiguous transport failure returns retryable provider error and leaves Payment pending', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_injected_transport';
+    const transportError = Object.assign(new Error('socket reset'), {
+      code: 'ECONNRESET',
+    });
+
+    const operation = createCheckoutSession(
+      { userId: testUserId, plan: 'basico' },
+      { requestCheckout: jest.fn().mockRejectedValue(transportError) }
+    );
+
+    await expect(operation).rejects.toBeInstanceOf(StripeCheckoutRequestError);
+    await expect(operation).rejects.toMatchObject({
+      name: 'StripeCheckoutRequestError',
+      statusCode: 502,
+      retryable: true,
+      providerResponded: false,
+      cause: transportError,
+    });
+
+    const payment = await prisma.payment.findFirst({
+      where: { userId: testUserId, planTier: 'basico' },
+      orderBy: { id: 'desc' },
+    });
+    expect(payment.status).toBe('pending');
+  });
+
+  test('does not swallow a local transition failure after authoritative rejection', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_force_error';
+    const localFailure = new Error('forced local transition failure');
+    const transitionPayment = jest.fn().mockRejectedValue(localFailure);
+
+    await expect(
+      createCheckoutSession(
+        { userId: testUserId, plan: 'master' },
+        { transitionPayment }
+      )
+    ).rejects.toBe(localFailure);
+
+    expect(transitionPayment).toHaveBeenCalledTimes(1);
+    const payment = await prisma.payment.findFirst({
+      where: { userId: testUserId, planTier: 'master' },
+      orderBy: { id: 'desc' },
+    });
+    expect(payment.status).toBe('pending');
   });
 });

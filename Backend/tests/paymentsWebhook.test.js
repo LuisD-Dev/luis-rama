@@ -131,7 +131,7 @@ describe('POST /api/payments/webhook', () => {
       expect(res.body.outcome).toBe('processed');
 
       const updatedPayment = await prisma.payment.findUnique({ where: { id: payment.id } });
-      expect(updatedPayment.status).toBe('completed');
+      expect(updatedPayment.status).toBe('succeeded');
 
       const subscription = await prisma.subscription.findUnique({
         where: { provider_externalId: { provider: 'stripe', externalId: 'sub_test_1' } },
@@ -147,6 +147,245 @@ describe('POST /api/payments/webhook', () => {
 
       const auditEntries = await prisma.auditLog.findMany({ where: { action: 'checkout.session.completed' } });
       expect(auditEntries).toHaveLength(1);
+    });
+
+    test('converges processing to succeeded through metadata before Checkout id attachment', async () => {
+      const payment = await prisma.payment.create({
+        data: {
+          userId: testUserId,
+          amount: 4999,
+          currency: 'usd',
+          planTier: 'master',
+          status: 'processing',
+          provider: 'stripe',
+          idempotencyKey: `checkout-processing-${Date.now()}`,
+        },
+      });
+      const event = {
+        id: 'evt_checkout_processing_metadata',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: 'cs_not_attached_locally',
+            mode: 'subscription',
+            customer: 'cus_processing_metadata',
+            subscription: 'sub_processing_metadata',
+            client_reference_id: String(testUserId),
+            metadata: { paymentId: String(payment.id), planTier: 'master' },
+          },
+        },
+      };
+
+      const res = await postEvent(event);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.outcome).toBe('processed');
+      const updatedPayment = await prisma.payment.findUnique({ where: { id: payment.id } });
+      expect(updatedPayment).toMatchObject({
+        status: 'succeeded',
+        stripeCheckoutSessionId: null,
+        externalId: 'sub_processing_metadata',
+      });
+      const user = await prisma.user.findUnique({ where: { id: testUserId } });
+      expect(user).toMatchObject({ planTier: 'master', role: 'premium' });
+    });
+
+    test('a distinct event for succeeded Payment is a no-op with no entitlement rewrite', async () => {
+      await prisma.user.update({
+        where: { id: testUserId },
+        data: { planTier: 'basico', role: 'student' },
+      });
+      const payment = await prisma.payment.create({
+        data: {
+          userId: testUserId,
+          amount: 2499,
+          currency: 'usd',
+          planTier: 'pro',
+          status: 'succeeded',
+          provider: 'stripe',
+          idempotencyKey: `checkout-already-succeeded-${Date.now()}`,
+        },
+      });
+      const event = {
+        id: 'evt_checkout_distinct_already_succeeded',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: 'cs_distinct_already_succeeded',
+            mode: 'subscription',
+            customer: 'cus_should_not_attach',
+            subscription: 'sub_should_not_create',
+            metadata: { paymentId: String(payment.id), planTier: 'pro' },
+          },
+        },
+      };
+
+      const res = await postEvent(event);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.outcome).toBe('already_succeeded');
+      const user = await prisma.user.findUnique({ where: { id: testUserId } });
+      expect(user).toMatchObject({
+        planTier: 'basico',
+        role: 'student',
+        stripeCustomerId: null,
+      });
+      expect(
+        await prisma.subscription.findUnique({
+          where: {
+            provider_externalId: {
+              provider: 'stripe',
+              externalId: 'sub_should_not_create',
+            },
+          },
+        })
+      ).toBeNull();
+    });
+
+    test.each(['failed', 'canceled'])(
+      'rejects success for terminal %s Payment and rolls back the event claim',
+      async (status) => {
+        const payment = await prisma.payment.create({
+          data: {
+            userId: testUserId,
+            amount: 999,
+            currency: 'usd',
+            planTier: 'basico',
+            status,
+            provider: 'stripe',
+            idempotencyKey: `checkout-terminal-${status}-${Date.now()}`,
+          },
+        });
+        const event = {
+          id: `evt_checkout_terminal_${status}`,
+          type: 'checkout.session.completed',
+          data: {
+            object: {
+              id: `cs_checkout_terminal_${status}`,
+              mode: 'subscription',
+              customer: `cus_checkout_terminal_${status}`,
+              subscription: `sub_checkout_terminal_${status}`,
+              metadata: { paymentId: String(payment.id), planTier: 'basico' },
+            },
+          },
+        };
+
+        const res = await postEvent(event);
+
+        expect(res.statusCode).toBe(500);
+        const unchanged = await prisma.payment.findUnique({ where: { id: payment.id } });
+        expect(unchanged.status).toBe(status);
+        expect(
+          await prisma.paymentEvent.findUnique({ where: { stripeEventId: event.id } })
+        ).toBeNull();
+        const user = await prisma.user.findUnique({ where: { id: testUserId } });
+        expect(user).toMatchObject({ planTier: null, role: 'student' });
+      }
+    );
+
+    test.each(['completed', 'processed'])(
+      'treats legacy %s Payment as read-only already-successful',
+      async (status) => {
+        const payment = await prisma.payment.create({
+          data: {
+            userId: testUserId,
+            amount: 999,
+            currency: 'usd',
+            planTier: 'basico',
+            status,
+            provider: 'stripe',
+            idempotencyKey: `checkout-legacy-${status}-${Date.now()}`,
+          },
+        });
+        const event = {
+          id: `evt_checkout_legacy_${status}`,
+          type: 'checkout.session.completed',
+          data: {
+            object: {
+              id: `cs_checkout_legacy_${status}`,
+              mode: 'subscription',
+              subscription: `sub_checkout_legacy_${status}`,
+              metadata: { paymentId: String(payment.id), planTier: 'basico' },
+            },
+          },
+        };
+
+        const res = await postEvent(event);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.outcome).toBe('legacy_already_succeeded');
+        const unchanged = await prisma.payment.findUnique({ where: { id: payment.id } });
+        expect(unchanged.status).toBe(status);
+        const user = await prisma.user.findUnique({ where: { id: testUserId } });
+        expect(user).toMatchObject({ planTier: null, role: 'student' });
+      }
+    );
+
+    test('duplicate Checkout event does not reapply entitlement', async () => {
+      const payment = await prisma.payment.create({
+        data: {
+          userId: testUserId,
+          amount: 2499,
+          currency: 'usd',
+          planTier: 'pro',
+          status: 'pending',
+          provider: 'stripe',
+          idempotencyKey: `checkout-duplicate-success-${Date.now()}`,
+        },
+      });
+      const event = {
+        id: 'evt_checkout_duplicate_success',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: 'cs_checkout_duplicate_success',
+            mode: 'subscription',
+            subscription: 'sub_checkout_duplicate_success',
+            metadata: { paymentId: String(payment.id), planTier: 'pro' },
+          },
+        },
+      };
+
+      expect((await postEvent(event)).body.outcome).toBe('processed');
+      await prisma.user.update({
+        where: { id: testUserId },
+        data: { planTier: null, role: 'student' },
+      });
+
+      const duplicate = await postEvent(event);
+
+      expect(duplicate.statusCode).toBe(200);
+      expect(duplicate.body.outcome).toBe('duplicate');
+      const user = await prisma.user.findUnique({ where: { id: testUserId } });
+      expect(user).toMatchObject({ planTier: null, role: 'student' });
+      expect(
+        await prisma.auditLog.findMany({ where: { action: 'checkout.session.completed' } })
+      ).toHaveLength(1);
+    });
+
+    test('does not activate entitlement without a resolved local Payment', async () => {
+      const event = {
+        id: 'evt_checkout_missing_payment',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: 'cs_checkout_missing_payment',
+            mode: 'subscription',
+            subscription: 'sub_checkout_missing_payment',
+            client_reference_id: String(testUserId),
+            metadata: { planTier: 'pro' },
+          },
+        },
+      };
+
+      const res = await postEvent(event);
+
+      expect(res.statusCode).toBe(500);
+      const user = await prisma.user.findUnique({ where: { id: testUserId } });
+      expect(user).toMatchObject({ planTier: null, role: 'student' });
+      expect(
+        await prisma.paymentEvent.findUnique({ where: { stripeEventId: event.id } })
+      ).toBeNull();
     });
   });
 
