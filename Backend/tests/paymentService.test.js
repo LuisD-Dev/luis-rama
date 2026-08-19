@@ -506,6 +506,7 @@ describe('paymentService', () => {
       expect(payment.id).toBe(paymentVisibleAtStripeCall.id);
       expect(payment.stripePaymentIntentId).toBe('pi_committed_first');
       expect(payment.status).toBe(PAYMENT_STATUSES.PENDING);
+      expect(payment.planTier).toBe(input.planTier);
     });
 
     test('reuses the same Payment and does not create another Stripe intent once attached', async () => {
@@ -705,6 +706,7 @@ describe('paymentService', () => {
       });
 
       expect(payment.status).toBe(PAYMENT_STATUSES.PROCESSING);
+      expect(payment.planTier).toBe(input.planTier);
       const stored = await prisma.payment.findUnique({ where: { id: payment.id } });
       expect(stored.status).toBe(PAYMENT_STATUSES.PROCESSING);
       expect(stored.status).not.toBe(PAYMENT_STATUSES.SUCCEEDED);

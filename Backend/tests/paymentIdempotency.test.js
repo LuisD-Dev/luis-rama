@@ -87,6 +87,12 @@ describe('Payment idempotency', () => {
       .set('Idempotency-Key', idempotencyKey)
       .send(payload);
     expect(res1.statusCode).toBe(200);
+    expect(res1.body).toEqual({
+      paymentId: expect.any(Number),
+      stripePaymentIntentId: expect.any(String),
+      status: 'pending',
+      planTier: 'basico',
+    });
 
     const res2 = await request(app)
       .post('/api/payments/payment-method')
@@ -98,10 +104,41 @@ describe('Payment idempotency', () => {
     expect(res2.body.stripePaymentIntentId).toBe(
       res1.body.stripePaymentIntentId
     );
+    expect(res2.body).toEqual(res1.body);
 
     // Check DB for only one payment with that idempotencyKey
     const payments = await prisma.payment.findMany({ where: { idempotencyKey } });
     expect(payments.length).toBe(1);
+  }, 20000);
+
+  test('returns a processing Payment with its persisted plan tier', async () => {
+    const idempotencyKey = `processing-response-${Date.now()}`;
+    const existing = await prisma.payment.create({
+      data: {
+        userId: testUserId,
+        amount: 4999,
+        currency: 'usd',
+        planTier: 'master',
+        provider: 'stripe',
+        paymentMethodId: 'pm_processing_response',
+        idempotencyKey,
+        status: 'processing',
+      },
+    });
+
+    const response = await request(app)
+      .post('/api/payments/payment-method')
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Idempotency-Key', idempotencyKey)
+      .send({ paymentMethodId: 'pm_processing_response', planTier: 'master' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toEqual({
+      paymentId: existing.id,
+      stripePaymentIntentId: expect.any(String),
+      status: 'processing',
+      planTier: 'master',
+    });
   }, 20000);
 
   test('returns HTTP 409 for an incompatible cross-user idempotency key without leaking identifiers', async () => {

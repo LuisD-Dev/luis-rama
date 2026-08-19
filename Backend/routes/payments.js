@@ -36,7 +36,12 @@ router.post(
         idempotencyKey: effectiveIdempotencyKey,
       });
 
-      res.json({ paymentId: payment.id, stripePaymentIntentId: payment.stripePaymentIntentId, status: payment.status });
+      res.json({
+        paymentId: payment.id,
+        stripePaymentIntentId: payment.stripePaymentIntentId,
+        status: payment.status,
+        planTier: payment.planTier,
+      });
     } catch (err) {
       if (
         err instanceof PaymentServiceError ||
