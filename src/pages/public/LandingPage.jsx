@@ -3,54 +3,62 @@ import { CheckoutModal } from '../../components/payments/CheckoutModal.jsx';
 import { useMemo, useRef, useState, useEffect } from 'react';
 import { statsService } from '../../services/api.js';
 import StripeCardForm from '../../components/payments/StripeCardForm.jsx';
+import { SiteFooter } from '../../components/common/SiteFooter.jsx';
+import { UIIcon } from '../../components/common/Icons.jsx';
 
-const navigation = [
-  { label: 'Inicio', href: '#inicio' },
-  { label: 'Recursos', href: '#explora' },
-  { label: 'Planes', href: '#premium' },
-  { label: 'Mi escuela', href: '#studio' },
-  { label: 'Contacto', href: '#contacto' },
+const demoSlides = [
+  { icon: 'video', title: 'Explora las lecciones', text: 'Rutas de aprendizaje en video, ordenadas paso a paso.' },
+  { icon: 'piano', title: 'Practica una escala', text: 'Teclado interactivo con escalas resaltadas en tiempo real.' },
+  { icon: 'star', title: 'Sube de plan', text: 'Desbloquea partituras exclusivas y sesiones 1:1.' },
+  { icon: 'trophy', title: 'Domina el piano', text: 'Avanza con constancia hasta tu certificado Teclia.' },
+];
+
+const trustChips = [
+  { icon: 'video', label: 'Lecciones en video' },
+  { icon: 'sheet', label: 'Partituras incluidas' },
+  { icon: 'star', label: 'Planes flexibles' },
+];
+
+const steps = [
+  { title: 'Crea tu cuenta', text: 'Regístrate en un minuto y entra a tu espacio de práctica.' },
+  { title: 'Elige tu plan', text: 'Accede al contenido según el nivel de acompañamiento que buscas.' },
+  { title: 'Practica con método', text: 'Video, partitura y teclado interactivo en la misma ruta.' },
+  { title: 'Toca con confianza', text: 'Avanza con claridad, feedback y constancia real.' },
 ];
 
 const features = [
-  {
-    title: 'Lecciones en video',
-    description: 'Lecciones prácticas en video y rutas de aprendizaje estructuradas.',
-  },
-  {
-    title: 'Piezas y acompañamientos',
-    description: 'Pistas y partituras para práctica y estudio.',
-  },
-  {
-    title: 'Lecciones estructuradas',
-    description: 'Módulos y ejercicios organizados para avanzar paso a paso.',
-  },
-  {
-    title: 'Teoría y partituras',
-    description: 'Artículos, escalas y partituras para profundizar el conocimiento musical.',
-  },
+  { icon: 'video', title: 'Lecciones en video', text: 'Clases prácticas, ordenadas por nivel, para estudiar a tu ritmo.' },
+  { icon: 'sheet', title: 'Partituras listas', text: 'Material preparado para sentarte al piano y empezar a tocar.' },
+  { icon: 'piano', title: 'Teclado interactivo', text: 'Escalas y notas resaltadas para oír y ver lo que practicas.' },
+  { icon: 'book', title: 'Teoría aplicada', text: 'Armonía y lectura explicadas con ejemplos que sí usas.' },
 ];
 
 const premiumPlans = [
   {
     label: 'Básico',
+    sub: 'Para empezar con buen pie',
     price: '$9.99',
     features: ['Acceso a recursos', 'Lecciones guiadas', 'Comunidad privada'],
-    details: 'Un plan ideal para comenzar, con acceso completo a recursos y una comunidad dedicada al aprendizaje.',
   },
   {
     label: 'Pro',
+    sub: 'El favorito de los alumnos',
     price: '$24.99',
-    features: ['Feedback de IA', 'Clases 1:1', 'Partituras exclusivas'],
+    features: ['Todo lo del Básico', 'Feedback de IA', 'Clases 1:1', 'Partituras exclusivas'],
     highlight: true,
-    details: 'El plan más equilibrado para acelerar tu progreso con apoyo guiado y contenido exclusivo.',
   },
   {
     label: 'Master',
+    sub: 'Experiencia VIP completa',
     price: '$49.99',
-    features: ['Plan personalizado', 'Sesiones premium', 'Análisis avanzado'],
-    details: 'Para quienes quieren una experiencia VIP completa con seguimiento premium y soporte prioritario.',
+    features: ['Todo lo del Pro', 'Plan personalizado', 'Sesiones premium', 'Análisis avanzado'],
   },
+];
+
+const testimonials = [
+  { quote: 'En dos meses pasé de no leer partituras a tocar mis primeras piezas completas. Las lecciones son clarísimas.', name: 'María F.', role: 'Alumna · Plan Pro', initial: 'M' },
+  { quote: 'El teclado interactivo y las escalas resaltadas me ayudaron a entender la teoría de una vez por todas.', name: 'Diego R.', role: 'Alumno · Plan Básico', initial: 'D' },
+  { quote: 'La mejor inversión para mi hija. Contenido serio, bien producido y con seguimiento real.', name: 'Ana L.', role: 'Madre de alumna', initial: 'A' },
 ];
 
 const rootNotes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -88,10 +96,15 @@ function LandingPage() {
   const [selectedScaleType, setSelectedScaleType] = useState(scaleTypes[0]);
   const [sustainMode, setSustainMode] = useState(false);
   const [sustainActive, setSustainActive] = useState(false);
-  const [activePlan, setActivePlan] = useState(null);
   const [checkoutPlan, setCheckoutPlan] = useState(null);
+  const [demoStep, setDemoStep] = useState(0);
   const checkoutBuying = useRef(false);
-  const closeCheckout = () => { setCheckoutPlan(null); checkoutBuying.current = false; };
+  const closeCheckout = () => {
+    setCheckoutPlan(null);
+    checkoutBuying.current = false;
+    sessionStorage.removeItem('checkout_plan');
+    sessionStorage.removeItem('checkout_resume');
+  };
   const audioContextRef = useRef(null);
   const audioStartedRef = useRef(false);
   const sustainHoldRef = useRef(false);
@@ -103,12 +116,22 @@ function LandingPage() {
       .catch(() => { });
   }, []);
 
-  // Resume checkout after login redirect
+  // Resume checkout only after login redirect, not on every visit
   useEffect(() => {
+    if (sessionStorage.getItem('checkout_resume') !== '1') return;
+    sessionStorage.removeItem('checkout_resume');
     const savedPlan = sessionStorage.getItem('checkout_plan');
-    if (savedPlan && !checkoutPlan) {
-      setCheckoutPlan(savedPlan);
-    }
+    if (savedPlan) setCheckoutPlan(savedPlan);
+  }, []);
+
+  // Auto-cycling hero mini-demo (respects reduced motion)
+  useEffect(() => {
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) return undefined;
+    const id = setInterval(() => {
+      setDemoStep((s) => (s + 1) % demoSlides.length);
+    }, 2600);
+    return () => clearInterval(id);
   }, []);
 
   const selectedScaleNotes = useMemo(() => {
@@ -372,144 +395,151 @@ function LandingPage() {
     ];
   }, []);
 
-  return (
-    <div className="page-shell">
-      <header className="topbar" id="inicio">
-        <nav className="nav-links">
-          {navigation.map((link) => (
-            <a key={link.href} href={link.href}>
-              {link.label}
-            </a>
-          ))}
-        </nav>
-      </header>
+  const openCheckout = (label) => {
+    if (checkoutBuying.current) return;
+    checkoutBuying.current = true;
+    setCheckoutPlan(label);
+  };
 
+  return (
+    <div className="lp">
       <main>
-        <section className="hero section-surface">
-          <div className="hero-copy">
-            <p className="eyebrow">Teclia · Academia de piano</p>
-            <h1>Aprende piano directamente con tu profesor.</h1>
-            <p className="hero-text">
-              Mis lecciones y recursos están diseñados para que los estudiantes practiquen con claridad.
-            </p>
-            <div className="hero-actions">
-              <a className="button button-primary" href="#explora">
-                Ver recursos
-              </a>
-              <a className="button button-secondary" href="#premium">
-                Ver planes
-              </a>
-              <a className="button button-secondary" href="/auth/login">
-                Ingresar como alumno
-              </a>
-            </div>
-          </div>
-          <div className="hero-panel">
-            <div className="hero-card">
-              <span className="hero-badge">Nuevo</span>
-              <h2>Una plataforma profesional</h2>
-              <p>Contenido preparado para que los estudiantes avancen con confianza y enfoque.</p>
-              <ul className="hero-list">
-                <li>Lecciones estructuradas para alumnos</li>
-                <li>Recursos listos para tu escuela</li>
-                <li>Control total sobre cada lección</li>
+        {/* ============ HERO: copy + animated demo ============ */}
+        <section className="lp-hero lp-hero-split bg-grid" id="inicio">
+          <div className="lp-hero-glow" aria-hidden="true" />
+          <div className="lp-hero-inner">
+            <div className="hero-copy animate-fade-up">
+              <span className="lp-badge"><span className="dot" /> Academia online · Música para todos</span>
+              <h1>Aprende piano <span className="grad">con acompañamiento real.</span></h1>
+              <p className="lp-lead">
+                Lecciones en video, partituras y ejercicios interactivos para practicar con claridad y avanzar con confianza.
+              </p>
+              <div className="lp-cta-row">
+                <a className="button button-primary" href="/auth/signup">Comenzar gratis</a>
+                <a className="button button-secondary" href="#planes">Ver planes</a>
+              </div>
+              <ul className="lp-trust">
+                {trustChips.map((chip) => (
+                  <li className="chip" key={chip.label}>
+                    <UIIcon name={chip.icon} size={14} />
+                    {chip.label}
+                  </li>
+                ))}
               </ul>
             </div>
+
+            <div className="hero-panel">
+              <div className="lp-demo animate-fade-up" style={{ '--delay': '120ms' }}>
+                <span className="lp-note-float" style={{ top: '14%', right: '10%' }} aria-hidden="true">♪</span>
+                <span className="lp-note-float" style={{ bottom: '12%', left: '8%', animationDelay: '1.5s' }} aria-hidden="true">♫</span>
+                <div className="lp-demo-head">
+                  <div className="lp-demo-dots"><span /><span /><span /></div>
+                  <span className="lp-demo-title">Teclia · demo</span>
+                </div>
+                <div className="lp-demo-stage">
+                  <div className="lp-demo-slide" key={demoStep}>
+                    <div className="lp-demo-icon" aria-hidden="true">
+                      <UIIcon name={demoSlides[demoStep].icon} size={28} />
+                    </div>
+                    <h4>{demoSlides[demoStep].title}</h4>
+                    <p>{demoSlides[demoStep].text}</p>
+                  </div>
+                </div>
+                <div className="lp-demo-progress" role="tablist" aria-label="Pasos de la demo">
+                  {demoSlides.map((slide, i) => (
+                    <button
+                      key={slide.title}
+                      type="button"
+                      className={i === demoStep ? 'on' : ''}
+                      onClick={() => setDemoStep(i)}
+                      aria-label={slide.title}
+                      aria-selected={i === demoStep}
+                      role="tab"
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
-        <section className="section-surface section-grid">
-          <div className="section-intro">
-            <p className="eyebrow">¿Por qué Teclia?</p>
-            <h2>Un espacio pensado para aprender y enseñar piano con profesionalismo.</h2>
+        {/* ============ CÓMO FUNCIONA ============ */}
+        <section className="lp-section" id="como-funciona">
+          <div className="lp-section-head">
+            <p className="lp-kicker">Cómo funciona</p>
+            <h2>De la primera lección a tocar con seguridad.</h2>
           </div>
-          <div className="feature-grid">
-            <article className="feature-card">
-              <h3>Claridad visual</h3>
-              <p>Un diseño limpio que deja el centro de atención en la música y el contenido.</p>
-            </article>
-            <article className="feature-card">
-              <h3>Contenido organizado</h3>
-              <p>Lecciones, partituras y recursos accesibles con una estructura clara.</p>
-            </article>
-            <article className="feature-card">
-              <h3>Control profesional</h3>
-              <p>Publica, administra y comparte cada recurso desde una interfaz sobria.</p>
-            </article>
-          </div>
+          <ol className="lp-steps">
+            {steps.map((step, i) => (
+              <li className="lp-step" key={step.title}>
+                <span className="lp-step-index">{String(i + 1).padStart(2, '0')}</span>
+                <h3>{step.title}</h3>
+                <p>{step.text}</p>
+              </li>
+            ))}
+          </ol>
         </section>
 
-        <section className="section-surface section-studio" id="studio">
-          <div>
-            <p className="eyebrow">Tu estudio</p>
-            <h2>Contenido curado para cada práctica.</h2>
-            <p className="section-copy">
-              Recursos bien organizados para que avances con confianza y disfrutes una práctica clara y profesional.
-            </p>
+        {/* ============ FEATURES ============ */}
+        <section className="lp-section" id="features">
+          <div className="lp-section-head">
+            <p className="lp-kicker">La academia</p>
+            <h2>Todo lo esencial para avanzar, en un solo lugar.</h2>
           </div>
-          <div className="studio-grid">
-            {features.map((item) => (
-              <article className="studio-card" key={item.title}>
-                <h3>{item.title}</h3>
-                <p>{item.description}</p>
+          <div className="lp-features">
+            {features.map((f) => (
+              <article className="lp-feature" key={f.title}>
+                <div className="lp-feature-icon" aria-hidden="true"><UIIcon name={f.icon} size={22} /></div>
+                <h3>{f.title}</h3>
+                <p>{f.text}</p>
               </article>
             ))}
           </div>
         </section>
 
-        <section className="section-surface section-preview" id="premium">
-          <div className="preview-copy">
-            <p className="eyebrow">Teclia Pro</p>
-            <h2>Experiencia premium para alumnos motivados</h2>
-            <p>Accede a planes, análisis de progreso y contenido premium para mejorar tu práctica.</p>
+        {/* ============ PLANES ============ */}
+        <section className="lp-section" id="planes">
+          <div className="lp-section-head">
+            <p className="lp-kicker">Planes</p>
+            <h2>Elige el ritmo que necesitas.</h2>
+            <p className="lp-section-copy">Sin permanencia. Cambia de plan cuando quieras.</p>
           </div>
-          <div className="pricing-grid">
+          <div className="lp-pricing">
             {premiumPlans.map((plan) => (
-              <div key={plan.label} className={`pricing-card ${plan.highlight ? 'pricing-card-highlight' : ''}`}>
-                {plan.highlight && <span className="plan-badge">Recomendado</span>}
+              <div key={plan.label} className={`lp-plan ${plan.highlight ? 'featured' : ''}`}>
+                {plan.highlight && <span className="lp-plan-tag">Recomendado</span>}
                 <h3>{plan.label}</h3>
-                <p className="plan-price">{plan.price}</p>
+                <p className="lp-plan-sub">{plan.sub}</p>
+                <div className="lp-plan-price">
+                  <span className="amount">{plan.price}</span>
+                  <span className="per">/mes</span>
+                </div>
                 <ul>
                   {plan.features.map((feature) => (
-                    <li key={feature}>{feature}</li>
+                    <li key={feature}>
+                      <UIIcon name="check" size={16} className="lp-check" />
+                      {feature}
+                    </li>
                   ))}
                 </ul>
-                <div className="plan-actions">
-                  <button
-                    type="button"
-                    className="button button-primary plan-buy-button"
-                    onClick={() => {
-                      if (checkoutBuying.current) return;
-                      checkoutBuying.current = true;
-                      setCheckoutPlan(plan.label);
-                    }}
-                  >
-                    Comprar {plan.label}
-                  </button>
-                  <button
-                    type="button"
-                    className="button button-outline"
-                    onClick={() => setActivePlan(activePlan === plan.label ? null : plan.label)}
-                  >
-                    {activePlan === plan.label ? 'Ocultar detalles' : 'Más información'}
-                  </button>
-                </div>
-                {activePlan === plan.label && (
-                  <div className="plan-extra">
-                    <p>{plan.details}</p>
-                  </div>
-                )}
+                <button
+                  type="button"
+                  className={`button ${plan.highlight ? 'button-primary' : 'button-secondary'} button-block`}
+                  onClick={() => openCheckout(plan.label)}
+                >
+                  Elegir {plan.label}
+                </button>
               </div>
             ))}
           </div>
-
         </section>
 
-        <section className="section-surface section-explore" id="explora">
+        {/* ============ HERRAMIENTA INTERACTIVA ============ */}
+        <section className="lp-section lp-explore" id="explora">
           <div className="explore-copy">
-            <p className="eyebrow">Explora</p>
-            <h2>Recursos gratuitos que hacen que aprender sea intuitivo.</h2>
-            <p>Biblioteca de escalas, teoría musical, notas en pentagrama y ejercicios interactivos. Todo en un solo lugar.</p>
+            <p className="lp-kicker">Practica ahora</p>
+            <h2>Escucha las escalas. Vuelve a tocarlas.</h2>
+            <p>Elige una tonalidad, una escala y pulsa el teclado. El audio se activa con tu primera nota.</p>
             <div className="scale-sign-selector">
               {rootNotes.map((note) => (
                 <button
@@ -580,56 +610,50 @@ function LandingPage() {
                 );
               })}
             </div>
-            <p className="keyboard-caption">Presiona cualquier tecla para activar el audio y escuchar cada nota.</p>
+            <p className="keyboard-caption">Presiona cualquier tecla para activar el audio.</p>
           </div>
         </section>
 
-        <section className="section-surface section-about" id="contacto">
-          <div className="about-copy">
-            <p className="eyebrow">Conecta conmigo</p>
-            <h2>Teclia se construye como tu próxima escuela de piano.</h2>
-            <p>Una experiencia elegante y profesional para estudiantes y creadores que valoran contenido claro y bien presentado.</p>
-            <div className="contact-cards">
-              <div className="contact-card">
-                <p className="contact-label">Teléfono</p>
-                <p className="contact-value">+506 62608415</p>
-              </div>
-              <div className="contact-card">
-                <p className="contact-label">Email</p>
-                <p className="contact-value">austinrmz2007@gmail.com</p>
-              </div>
-            </div>
+        {/* ============ TESTIMONIOS ============ */}
+        <section className="lp-section" id="testimonios">
+          <div className="lp-section-head">
+            <p className="lp-kicker">Alumnos</p>
+            <h2>Historias reales de progreso.</h2>
           </div>
-          <div className="social-panel">
-            <p className="social-title">Redes sociales</p>
-            <div className="social-links">
-              <a href="https://www.instagram.com/tecliaacademy?utm_source=qr" aria-label="Instagram">Instagram</a>
-              <a href="#" aria-label="YouTube">YouTube</a>
-              <a href="#" aria-label="TikTok">TikTok</a>
-              <a href="#" aria-label="LinkedIn">LinkedIn</a>
+          <div className="lp-testimonials">
+            {testimonials.map((t) => (
+              <article className="lp-quote" key={t.name}>
+                <p>“{t.quote}”</p>
+                <div className="lp-quote-author">
+                  <span className="lp-quote-avatar" aria-hidden="true">{t.initial}</span>
+                  <div>
+                    <strong>{t.name}</strong>
+                    <span>{t.role}</span>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        {/* ============ CTA FINAL ============ */}
+        <section className="lp-finale" id="contacto">
+          <div className="lp-finale-inner">
+            <p className="lp-kicker">Empieza hoy</p>
+            <h2>Tu primera lección está a un clic.</h2>
+            <p>Únete a Teclia y practica con la guía correcta desde el primer día.</p>
+            <div className="lp-cta-row">
+              <a className="button button-invert" href="/auth/signup">Comenzar gratis</a>
+              <a className="button button-secondary" href="#planes">Ver planes</a>
             </div>
           </div>
         </section>
       </main>
 
-      <footer className="footer">
-        <div>
-          <p>© 2026 Teclia. Todos los derechos reservados.</p>
-          <p className="footer-copy">Aprendizaje de piano con estilo profesional y contenidos claros.</p>
-        </div>
-        <div className="footer-links">
-          <a href="#inicio">Inicio</a>
-          <a href="#explora">Explora</a>
-          <a href="#premium">Premium</a>
-          <a href="#contacto">Contacto</a>
-        </div>
-      </footer>
+      <SiteFooter />
+
       {checkoutPlan && (
         <CheckoutModal onClose={closeCheckout}>
-          <h3 style={{ margin: '0 0 0.75rem' }}>Compra tu plan</h3>
-          <p style={{ margin: '0 0 1.25rem', color: '#b0b0b0', fontSize: '0.95rem' }}>
-            Completando la compra de <strong>{checkoutPlan}</strong>
-          </p>
           <CheckoutFlow
             initialPlan={checkoutPlan}
             onComplete={closeCheckout}

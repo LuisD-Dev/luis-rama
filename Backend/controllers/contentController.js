@@ -1,5 +1,5 @@
 import prisma from '../utils/prismaClient.js';
-import { canAccessPlan, PLAN_TIERS } from '../utils/plans.js';
+import { canAccessPlan, normalizePlanTier, PLAN_TIERS } from '../utils/plans.js';
 import { formatContent } from '../utils/serializers.js';
 import { buildFreeContentWhere, getContentPlanTier, isContentFree } from '../utils/contentAccess.js';
 import storage from '../storage/index.js';
@@ -70,12 +70,31 @@ const resolveContentUrls = async (items) => {
   );
 };
 
+const resolveEffectiveUserPlanTier = (planTier) => {
+  if (planTier === null || planTier === undefined) {
+    return PLAN_TIERS.FREE;
+  }
+
+  if (typeof planTier !== 'string') {
+    return null;
+  }
+
+  const trimmedPlanTier = planTier.trim();
+  if (!trimmedPlanTier) {
+    return PLAN_TIERS.FREE;
+  }
+
+  return normalizePlanTier(trimmedPlanTier);
+};
+
 const filterContentForUser = (content, access) => {
   if (!access) {
     return content.filter(isContentFree);
   }
   if (access.role === 'admin') return content;
-  return content.filter((item) => canAccessPlan(access.plan_tier, getContentPlanTier(item)));
+
+  const effectiveUserTier = resolveEffectiveUserPlanTier(access.plan_tier);
+  return content.filter((item) => canAccessPlan(effectiveUserTier, getContentPlanTier(item)));
 };
 
 export const getContent = async (req, res) => {
@@ -139,8 +158,13 @@ export const uploadContent = async (req, res) => {
       finalUrl = storagePath;
     }
 
-    const selectedPlan = plan_tier || (is_free === '1' || is_free === 'true' || is_free === 'on' ? 'free' : 'basico');
-    if (!PLAN_TIERS.includes(selectedPlan)) {
+    const requestedPlan = plan_tier ?? (
+      is_free === '1' || is_free === 'true' || is_free === 'on'
+        ? PLAN_TIERS.FREE
+        : PLAN_TIERS.BASICO
+    );
+    const selectedPlan = normalizePlanTier(requestedPlan);
+    if (!selectedPlan || !PLAN_TIERS.includes(selectedPlan)) {
       return res.status(400).json({ error: 'Plan de contenido no válido' });
     }
 

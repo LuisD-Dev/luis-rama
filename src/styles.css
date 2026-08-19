@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'Manrope', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: #080808;
   color: #f5f5f5;
   font-size: 16px;
@@ -79,34 +79,7 @@ body {
   box-shadow: 0 10px 24px rgba(0,0,0,0.45);
 }
 
-/* section transitions */
-.section-active {
-  transform: translateY(-6px) scale(1.01);
-  box-shadow: 0 36px 80px rgba(0,0,0,0.45);
-  transition: transform 420ms cubic-bezier(.2,.9,.2,1), box-shadow 420ms ease;
-}
-
-/* subtle tilt based on scroll velocity */
-:root {
-  --scroll-velocity: 0;
-}
-.section-surface {
-  transform-origin: center;
-  transition: transform 360ms cubic-bezier(.2,.9,.2,1);
-  will-change: transform;
-}
-.section-surface.section-active {
-  /* small parallax tilt proportional to velocity */
-  transform: translateY(-6px) rotateX(calc(var(--scroll-velocity) * 0.6deg));
-}
-
-/* Direction subtle motion */
-.scrolling-down .section-surface {
-  transform: translateY(-8px);
-}
-.scrolling-up .section-surface {
-  transform: translateY(4px);
-}
+/* Sections stay stable while scrolling: no tilt, shift or velocity effects. */
 
 /* Piano-specific visual effects */
 @keyframes keyPulse {
@@ -165,14 +138,7 @@ button {
   animation: fadeInUp 0.75s ease both;
 }
 
-main {
-  scroll-snap-type: y proximity;
-}
-
-section {
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
-}
+/* Free scrolling: snap points removed for a smoother, more predictable read. */
 
 .topbar {
   display: flex;
@@ -1054,6 +1020,23 @@ h1 {
 
 .stat-label {
   color: #d3d3d3;
+}
+
+.stats-error {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.stats-error p {
+  margin: 0;
+  color: #ffd0d0;
 }
 
 .recent-list {
@@ -2162,6 +2145,22 @@ h1 {
   font-size: 0.85rem;
 }
 
+.form-group input[aria-invalid="true"] {
+  border-color: #ff8f8f;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .sub-description {
   margin: 0;
   color: #d1d1d1;
@@ -2364,13 +2363,7 @@ h1 {
 }
 
 .section-surface {
-  transition: transform 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
-}
-
-.section-surface:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.16);
-  border-color: rgba(255, 255, 255, 0.12);
+  transition: border-color 220ms ease;
 }
 
 .hero, .section-surface, .content-card, .pricing-card, .feature-card {

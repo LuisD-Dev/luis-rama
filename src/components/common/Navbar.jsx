@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth.js';
 import { Logo } from './Logo.jsx';
+import { UIIcon } from './Icons.jsx';
 import { resolveAvatar } from '../../utils/avatar.js';
 import { planLabel } from '../../utils/plans.js';
 import { useEffect, useState } from 'react';
@@ -47,12 +48,12 @@ export const Navbar = () => {
               </div>
               <span className="user-role role-badge">
                 {user.role === 'admin'
-                  ? '👑 Instructor'
+                  ? 'Instructor'
                   : user.plan_tier
-                    ? `✨ ${planLabel(user.plan_tier)}`
+                    ? planLabel(user.plan_tier)
                     : user.role === 'premium'
-                      ? '✨ Alumno premium'
-                      : '🎓 Estudiante'}
+                      ? 'Alumno premium'
+                      : 'Estudiante'}
               </span>
             </div>
           ) : (
@@ -84,20 +85,21 @@ export const Navbar = () => {
                 <button
                   className="button button-settings"
                   title="Configuración"
+                  aria-label="Configuración"
                   onClick={() => setSettingsOpen(!settingsOpen)}
                 >
-                  ⚙️
+                  <UIIcon name="gear" size={18} />
                 </button>
                 {settingsOpen && (
                   <div className="settings-dropdown">
                     <Link to="/profile" className="settings-option" onClick={() => { setSettingsOpen(false); closeMobile(); }}>
-                      👤 Mi Perfil
+                      <UIIcon name="user" size={16} /> Mi perfil
                     </Link>
                     <Link to="/profile?tab=security" className="settings-option" onClick={() => { setSettingsOpen(false); closeMobile(); }}>
-                      🔒 Seguridad
+                      <UIIcon name="lock" size={16} /> Seguridad
                     </Link>
                     <Link to="/profile?tab=subscription" className="settings-option" onClick={() => { setSettingsOpen(false); closeMobile(); }}>
-                      ⭐ Suscripción
+                      <UIIcon name="star" size={16} /> Suscripción
                     </Link>
                     <div className="settings-divider"></div>
                     <button
@@ -108,7 +110,7 @@ export const Navbar = () => {
                         closeMobile();
                       }}
                     >
-                      🚪 Cerrar sesión
+                      <UIIcon name="logout" size={16} /> Cerrar sesión
                     </button>
                   </div>
                 )}
@@ -123,7 +125,7 @@ export const Navbar = () => {
             aria-expanded={mobileOpen}
             onClick={() => setMobileOpen(!mobileOpen)}
           >
-            {mobileOpen ? '✕' : '☰'}
+            <UIIcon name={mobileOpen ? 'close' : 'menu'} size={20} />
           </button>
         </div>
       </div>

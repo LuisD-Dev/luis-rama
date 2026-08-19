@@ -13,7 +13,7 @@ const cardElementOptions = {
   style: {
     base: {
       color: '#f5f5f5',
-      fontFamily: 'Inter, system-ui, sans-serif',
+      fontFamily: 'Manrope, system-ui, sans-serif',
       fontSize: '16px',
       '::placeholder': {
         color: '#9ca3af',
@@ -77,7 +77,15 @@ function StripeCardFormContent({ submitLabel, successMessage, onSuccess }) {
       }
 
       // PCI: the backend receives only Stripe's opaque identifier, never card data.
-      await paymentsService.submitPaymentMethod(paymentMethod.id);
+      // Generate or reuse client idempotency key for this checkout attempt
+      const existingKey = sessionStorage.getItem('checkout_idempotency_key');
+      const idempotencyKey = existingKey || crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      if (!existingKey) sessionStorage.setItem('checkout_idempotency_key', idempotencyKey);
+
+      // Determine plan stored by CheckoutFlow
+      const planTier = sessionStorage.getItem('checkout_plan');
+
+      await paymentsService.submitPaymentMethod(paymentMethod.id, { idempotencyKey, planTier });
       card.clear();
       setStatus({ type: 'success', message: successMessage });
       onSuccess?.(paymentMethod.id);
@@ -99,15 +107,18 @@ function StripeCardFormContent({ submitLabel, successMessage, onSuccess }) {
 
       {status && (
         <div
-          className={status.type === 'success' ? 'success-message payment-status success' : 'error-message payment-status error'}
+          key={status.message}
+          className={status.type === 'success' ? 'success-message payment-status success' : 'error-message payment-status error animate-shake'}
           role={status.type === 'error' ? 'alert' : 'status'}
         >
           {status.message}
         </div>
       )}
 
-      <button type="submit" className="button button-primary" disabled={!stripe || isProcessing}>
-        {isProcessing ? 'Procesando…' : submitLabel}
+      <button type="submit" className="button button-primary button-block" disabled={!stripe || isProcessing}>
+        {isProcessing ? (
+          <span className="btn-loading"><span className="spinner" /> Procesando…</span>
+        ) : submitLabel}
       </button>
       <p className="payment-note">Los datos de la tarjeta se envían de forma segura directamente a Stripe.</p>
     </form>

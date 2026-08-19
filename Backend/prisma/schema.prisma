@@ -17,8 +17,11 @@ model User {
   resetPin          String?   @map("reset_pin")
   resetPinExpiresAt DateTime? @map("reset_pin_expires_at")
   planTier          String?   @map("plan_tier")
+  stripeCustomerId  String?   @unique @map("stripe_customer_id")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
+  payments          Payment[]
+  subscriptions     Subscription[]
 
   @@map("users")
 }
@@ -43,4 +46,76 @@ model SiteStat {
   value Int    @default(0)
 
   @@map("site_stats")
+}
+
+model Payment {
+  id                      Int       @id @default(autoincrement())
+  userId                  Int       @map("user_id")
+  amount                  Int
+  currency                String    @default("usd")
+  planTier                String    @map("plan_tier")
+  status                  String    @default("pending")
+  provider                String    @default("stripe")
+  externalId              String?   @map("external_id")
+  paymentMethodId         String?   @map("payment_method_id")
+  stripePaymentIntentId   String?   @unique @map("stripe_payment_intent_id")
+  stripeCheckoutSessionId String?   @unique @map("stripe_checkout_session_id")
+  idempotencyKey          String    @unique @map("idempotency_key")
+  metadata                String?
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  user   User           @relation(fields: [userId], references: [id])
+  events PaymentEvent[]
+
+  @@index([userId, createdAt])
+  @@map("payments")
+}
+
+model Subscription {
+  id                 Int      @id @default(autoincrement())
+  userId             Int      @map("user_id")
+  planTier           String   @map("plan_tier")
+  status             String   @default("active")
+  provider           String   @default("stripe")
+  externalId         String   @map("external_id")
+  currentPeriodStart DateTime @map("current_period_start")
+  currentPeriodEnd   DateTime @map("current_period_end")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([provider, externalId])
+  @@index([userId])
+  @@map("subscriptions")
+}
+
+model PaymentEvent {
+  id             Int       @id @default(autoincrement())
+  paymentId      Int?      @map("payment_id")
+  type           String
+  payload        String
+  processedAt    DateTime? @map("processed_at")
+  idempotencyKey String    @unique @map("idempotency_key")
+  stripeEventId  String?   @unique @map("stripe_event_id")
+  outcome        String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  payment Payment? @relation(fields: [paymentId], references: [id])
+
+  @@map("payment_events")
+}
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  actor       String
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    Int?     @map("entity_id")
+  beforeState String?  @map("before_state")
+  afterState  String?  @map("after_state")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("audit_logs")
 }

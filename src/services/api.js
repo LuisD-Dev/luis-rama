@@ -2,8 +2,19 @@ import axios from 'axios';
 import { getRequestSignal, invokeLogout } from '../utils/authSession.js';
 import { getCsrfToken, getStoredToken, generateCsrfToken } from '../utils/jwt.js';
 
-export const BACKEND_BASE_URL = 'https://teclia-academia-2.onrender.com';
-const API_BASE_URL = `${BACKEND_BASE_URL}/api`;
+const resolveApiBase = () => {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configured) {
+    return configured.replace(/\/$/, '');
+  }
+  if (import.meta.env.PROD) {
+    return '/api';
+  }
+  return 'http://localhost:3001/api';
+};
+
+export const BACKEND_BASE_URL = resolveApiBase().replace(/\/api$/, '') || '';
+const API_BASE_URL = resolveApiBase();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -112,8 +123,41 @@ export const contentService = {
 };
 
 export const paymentsService = {
-  submitPaymentMethod: (paymentMethodId) =>
-    api.post('/payments/payment-method', { paymentMethodId }),
+  submitPaymentMethod: (paymentMethodId, { idempotencyKey, planTier } = {}) =>
+    api.post('/payments/payment-method', { paymentMethodId, planTier, idempotencyKey }, { headers: { ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) } }),
 };
 
 export default api;
+
+async function request(path, { method = 'GET', body, token } = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.message || 'Request failed');
+  }
+
+  return data;
+}
+
+export async function createPaymentIntent(planTier, token) {
+  return request('/payments/intent', {
+    method: 'POST',
+    body: { plan_tier: planTier },
+    token
+  });
+}
+
+export async function confirmPaymentIntent(paymentId, token) {
+  return request(`/payments/intent/${paymentId}/confirm`, {
+    method: 'POST',
+    token
+  });
+}

@@ -10,6 +10,7 @@ import { StatusBadge } from '../../components/admin/StatusBadge.jsx';
 import { StudentProfilePanel } from '../../components/admin/StudentProfilePanel.jsx';
 import { useKeyboardShortcuts, KeyboardShortcutsHelp } from '../../components/common/KeyboardShortcuts.jsx';
 import { exportStudentsToCsv } from '../../utils/csv.js';
+import { UIIcon } from '../../components/common/Icons.jsx';
 
 const ITEMS_PER_PAGE = 20;
 
@@ -256,10 +257,10 @@ export const AdminStudentsPage = () => {
             </select>
           </div>
           <button className="button button-secondary small" onClick={() => exportStudentsToCsv(filteredStudents)} title="Exportar a CSV">
-            ⬇ CSV
+            <UIIcon name="download" size={15} /> CSV
           </button>
           <button className="button button-ghost small" onClick={() => setShowShortcuts(true)} title="Atajos de teclado" aria-label="Atajos de teclado">
-            ⌨️
+            <UIIcon name="keyboard" size={16} />
           </button>
         </div>
 

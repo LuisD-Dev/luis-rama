@@ -1,3 +1,5 @@
+import { normalizePlanTier } from './plans.js';
+
 const FREE_PLAN_TIER = 'free';
 const DEFAULT_PAID_PLAN_TIER = 'basico';
 const KNOWN_PAID_PLAN_TIERS = new Set(['basico', 'pro', 'master']);
@@ -29,7 +31,7 @@ export const isContentFree = (content) => {
   const planTier = readPlanTier(content);
 
   if (typeof planTier === 'string' && planTier.length > 0) {
-    return planTier === FREE_PLAN_TIER;
+    return normalizePlanTier(planTier) === FREE_PLAN_TIER;
   }
 
   if (planTier !== null && typeof planTier !== 'undefined') {
@@ -46,7 +48,8 @@ export const getContentPlanTier = (content) => {
   if (isContentFree(content)) return FREE_PLAN_TIER;
 
   const planTier = readPlanTier(content);
-  if (KNOWN_PAID_PLAN_TIERS.has(planTier)) return planTier;
+  const normalizedPlanTier = normalizePlanTier(planTier);
+  if (KNOWN_PAID_PLAN_TIERS.has(normalizedPlanTier)) return normalizedPlanTier;
 
   // Missing legacy tiers remain paid. Unknown explicit tiers fail at master.
   if (typeof planTier === 'string' && planTier.length > 0) return 'master';

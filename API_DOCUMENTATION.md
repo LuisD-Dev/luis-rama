@@ -210,6 +210,121 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ----
 
+**Admin routes** (`/api/admin`)
+
+- GET /api/admin/stats
+  - Description: Admin-only dashboard metrics with payment-based revenue and active subscriptions by tier.
+  - Auth required: Yes
+  - Role: admin only
+  - Revenue source: only `completed` payment records from `payments` table.
+  - Response example:
+
+```json
+{
+  "pageVisits": 123,
+  "studentCount": 42,
+  "revenueThisMonth": 180.0,
+  "revenueLastMonth": 40.0,
+  "revenueChange": 350,
+  "activeSubscriptions": {
+    "basico": 10,
+    "pro": 6,
+    "master": 2,
+    "total": 18
+  },
+  "currency": "USD"
+}
+```
+
+**Payments routes** (`/api/payments`)
+
+- POST /api/payments/checkout
+  - Description: Create a Stripe Checkout Session for the authenticated user’s selected plan. Persists a pending `Payment` linked to the session and returns the hosted Checkout URL.
+  - Auth required: Yes (Bearer token)
+  - Body example:
+
+```json
+{
+  "plan": "basico"
+}
+```
+
+  - Accepted `plan` values: `basico`, `pro`, `master` (mapped to Stripe Price IDs via `STRIPE_PRICE_BASICO`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_MASTER`).
+  - Response example (200):
+
+```json
+{
+  "checkoutUrl": "https://checkout.stripe.com/c/pay/cs_test_...",
+  "sessionId": "cs_test_..."
+}
+```
+
+  - Error responses:
+    - `401` — missing or invalid JWT
+    - `400` — missing/invalid `plan`, or missing Stripe price / success/cancel URL configuration
+    - `502` — Stripe API failure (safe client message; details logged server-side only)
+
+- POST /api/payments/payment-method
+  - Description: Existing Stripe Elements path. Confirms a PaymentIntent for a tokenized `paymentMethodId` (not hosted Checkout).
+  - Auth required: Yes (Bearer token)
+  - Body: `{ "paymentMethodId": "pm_...", "planTier": "basico", "idempotencyKey": "..." }` (idempotency key may also be sent as `Idempotency-Key` header)
+
+----
+
+**Payment persistence schema**
+
+All payment writes go through `Backend/services/paymentService.js` (`createPaymentIntent`, `markPaymentCompleted`, `recordPaymentEvent`). Controllers/routes must not write payment tables directly.
+
+### `payments`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | Int PK | |
+| `user_id` | Int FK → users | Indexed with `created_at` |
+| `plan_tier` | String | `basico` \| `pro` \| `master` |
+| `amount` | Int | Amount in cents |
+| `currency` | String | Default `usd` |
+| `status` | String | `pending` \| `completed` \| `failed` \| `canceled` |
+| `provider` | String | Default `stripe` |
+| `external_id` | String? | Provider payment/session id |
+| `idempotency_key` | String UNIQUE | Prevents duplicate intents |
+| `metadata` | String? | JSON blob |
+| `stripe_payment_intent_id` | String? UNIQUE | Stripe PI (legacy/elements path) |
+| `stripe_checkout_session_id` | String? UNIQUE | Stripe Checkout session |
+| `created_at` / `updated_at` | DateTime | |
+
+Indexes: unique `idempotency_key`; index `(user_id, created_at)`.
+
+### `subscriptions`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | Int PK | |
+| `user_id` | Int FK → users | |
+| `plan_tier` | String | |
+| `status` | String | `active` \| `canceled` \| `past_due` |
+| `provider` | String | Default `stripe` |
+| `external_id` | String | Unique with `provider` |
+| `current_period_start` / `current_period_end` | DateTime | |
+
+Created/activated inside `markPaymentCompleted` in the same transaction that sets payment `completed` and upgrades `users.plan_tier` / `role` to `premium`.
+
+### `payment_events`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | Int PK | |
+| `payment_id` | Int? FK → payments | |
+| `type` | String | e.g. `payment.completed`, Stripe event types |
+| `payload` | String | JSON |
+| `processed_at` | DateTime? | |
+| `idempotency_key` | String UNIQUE | Dedupes event processing |
+| `stripe_event_id` | String? UNIQUE | Stripe webhook event id |
+| `outcome` | String? | `processing` \| `processed` \| `duplicate` \| `failed` \| `ignored` |
+
+Migrations: forward `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`, reverse `.../down.sql` (also mirrored under `Backend/db/migrations/`).
+----
+
 Notes and mapping
 
 - The API endpoints in this documentation correspond to the server code under `Backend/routes`.

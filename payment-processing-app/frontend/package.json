@@ -1,0 +1,28 @@
+{
+  "name": "payment-processing-app",
+  "version": "1.0.0",
+  "description": "A payment processing application with frontend and backend integration.",
+  "main": "main.jsx",
+  "scripts": {
+    "start": "vite",
+    "build": "vite build",
+    "serve": "vite preview"
+  },
+  "dependencies": {
+    "react": "^17.0.2",
+    "react-dom": "^17.0.2",
+    "axios": "^0.21.1"
+  },
+  "devDependencies": {
+    "vite": "^2.6.4",
+    "vite-plugin-react": "^1.0.0"
+  },
+  "keywords": [
+    "payment",
+    "processing",
+    "react",
+    "frontend"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}

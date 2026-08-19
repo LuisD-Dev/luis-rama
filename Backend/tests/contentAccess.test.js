@@ -21,6 +21,13 @@ describe('Canonical free-content classification', () => {
     expect(getContentPlanTier({ planTier: 'master', isFree: 1 })).toBe('master');
   });
 
+  it('keeps the legacy premium alias paid when the legacy free flag is stale', () => {
+    const content = { planTier: 'premium', isFree: 1 };
+
+    expect(isContentFree(content)).toBe(false);
+    expect(getContentPlanTier(content)).toBe('basico');
+  });
+
   it('supports legacy free rows only when no explicit plan exists', () => {
     expect(isContentFree({ planTier: null, isFree: 1 })).toBe(true);
     expect(getContentPlanTier({ planTier: null, isFree: 1 })).toBe('free');

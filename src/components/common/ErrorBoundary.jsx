@@ -1,4 +1,5 @@
 import { Component } from 'react';
+import { UIIcon } from './Icons.jsx';
 
 export class ErrorBoundary extends Component {
   constructor(props) {
@@ -25,7 +26,7 @@ export class ErrorBoundary extends Component {
       return (
         <div className="error-boundary">
           <div className="error-boundary-content">
-            <span className="error-boundary-icon">⚠️</span>
+            <span className="error-boundary-icon"><UIIcon name="warning" size={30} /></span>
             <h2>Algo salió mal</h2>
             <p>Ocurrió un error inesperado. Intenta recargar la página.</p>
             <div className="error-boundary-actions">
