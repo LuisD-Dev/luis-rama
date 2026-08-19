@@ -181,6 +181,35 @@ export async function applyTransition(tx, paymentId, to, meta = undefined) {
   });
 }
 
+/**
+ * Create a Payment at the canonical initial state and advance it to pending on
+ * the caller's Prisma transaction/client. Callers cannot select the initial
+ * status and remain responsible for opening/committing any transaction.
+ */
+export async function createPaymentInPendingState(tx, data, meta = undefined) {
+  if (!tx?.payment || typeof tx.payment.create !== 'function') {
+    throw new TypeError('A Prisma transaction/client with payment.create is required');
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new TypeError('Payment data is required');
+  }
+
+  const { status: _ignoredStatus, ...paymentData } = data;
+  const created = await tx.payment.create({
+    data: {
+      ...paymentData,
+      status: PAYMENT_STATUSES.CREATED,
+    },
+  });
+  const transition = await applyTransition(
+    tx,
+    created.id,
+    PAYMENT_STATUSES.PENDING,
+    meta
+  );
+  return transition.payment;
+}
+
 export default {
   PAYMENT_STATUSES,
   CANONICAL_PAYMENT_STATUSES,
@@ -189,4 +218,5 @@ export default {
   isCanonicalPaymentStatus,
   assertTransition,
   applyTransition,
+  createPaymentInPendingState,
 };

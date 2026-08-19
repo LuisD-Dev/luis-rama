@@ -3,6 +3,7 @@ import { setupTestDb } from './helpers/db.setup.js';
 import prisma from '../utils/prismaClient.js';
 import {
   createPaymentIntent,
+  confirmSimulatedPayment,
   createOrReusePayment,
   processPaymentIntentWebhookEvent,
   activateOneTimePaymentEntitlement,
@@ -11,6 +12,7 @@ import {
   InvalidPlanError,
   PaymentIdempotencyConflictError,
   PaymentIntentConflictError,
+  PaymentConfirmationConflictError,
   PaymentNotFoundError,
   StripePaymentIntentError,
   StripePaymentRequestError,
@@ -215,6 +217,84 @@ describe('paymentService', () => {
     await expect(
       markPaymentCompleted({ paymentId: 999999999 })
     ).rejects.toBeInstanceOf(PaymentNotFoundError);
+  });
+
+  test('a simulated confirmation CAS loser never invokes the entitlement writer', async () => {
+    const processing = {
+      id: 901,
+      userId,
+      planTier: 'pro',
+      status: PAYMENT_STATUSES.PROCESSING,
+    };
+    const succeeded = { ...processing, status: PAYMENT_STATUSES.SUCCEEDED };
+    const tx = {
+      payment: {
+        findUnique: jest.fn().mockResolvedValue(processing),
+      },
+    };
+    const db = {
+      $transaction: jest.fn(async (callback) => callback(tx)),
+    };
+    const transitionPayment = jest.fn().mockResolvedValue({
+      applied: false,
+      outcome: 'already_at_target',
+      previousStatus: PAYMENT_STATUSES.PROCESSING,
+      targetStatus: PAYMENT_STATUSES.SUCCEEDED,
+      currentStatus: PAYMENT_STATUSES.SUCCEEDED,
+      payment: succeeded,
+    });
+    const entitlementWriter = jest.fn();
+
+    await expect(
+      confirmSimulatedPayment(
+        { paymentId: processing.id, actorId: 77 },
+        { db, transitionPayment, entitlementWriter }
+      )
+    ).rejects.toBeInstanceOf(PaymentConfirmationConflictError);
+
+    expect(transitionPayment).toHaveBeenCalledTimes(1);
+    expect(entitlementWriter).not.toHaveBeenCalled();
+  });
+
+  test('repeated simulated confirmations invoke the entitlement writer exactly once', async () => {
+    let current = {
+      id: 902,
+      userId,
+      planTier: 'master',
+      status: PAYMENT_STATUSES.PENDING,
+    };
+    const tx = {
+      payment: {
+        findUnique: jest.fn(async () => ({ ...current })),
+      },
+    };
+    const db = {
+      $transaction: jest.fn(async (callback) => callback(tx)),
+    };
+    const transitionPayment = jest.fn(async (_tx, _paymentId, targetStatus) => {
+      const previousStatus = current.status;
+      current = { ...current, status: targetStatus };
+      return {
+        applied: true,
+        outcome: 'applied',
+        previousStatus,
+        targetStatus,
+        currentStatus: targetStatus,
+        payment: { ...current },
+      };
+    });
+    const entitlementWriter = jest.fn();
+    const options = { db, transitionPayment, entitlementWriter };
+
+    await expect(
+      confirmSimulatedPayment({ paymentId: current.id, actorId: 77 }, options)
+    ).resolves.toMatchObject({ status: PAYMENT_STATUSES.SUCCEEDED });
+    await expect(
+      confirmSimulatedPayment({ paymentId: current.id, actorId: 77 }, options)
+    ).rejects.toBeInstanceOf(PaymentConfirmationConflictError);
+
+    expect(entitlementWriter).toHaveBeenCalledTimes(1);
+    expect(transitionPayment).toHaveBeenCalledTimes(2);
   });
 
   describe('createOrReusePayment Phase 2A protocol', () => {

@@ -6,6 +6,7 @@ import {
   PaymentTransitionError,
   applyTransition,
   assertTransition,
+  createPaymentInPendingState,
   isCanonicalPaymentStatus,
 } from '../services/paymentStateMachine.js';
 
@@ -319,6 +320,88 @@ describe('paymentStateMachine', () => {
         PaymentTransitionError
       );
       expect(tx.payment.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createPaymentInPendingState', () => {
+    test('creates as created, transitions on the supplied tx, and returns pending', async () => {
+      const created = { id: 70, userId: 12, planTier: 'pro', status: S.CREATED };
+      const pending = { ...created, status: S.PENDING };
+      const tx = {
+        payment: {
+          create: jest.fn().mockResolvedValue(created),
+          findUnique: jest
+            .fn()
+            .mockResolvedValueOnce(created)
+            .mockResolvedValueOnce(pending),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+      };
+      const data = {
+        userId: 12,
+        planTier: 'pro',
+        amount: 2499,
+        idempotencyKey: 'initializer-70',
+      };
+      const meta = {
+        source: 'test',
+        actorType: 'system',
+        reason: 'initialize payment',
+      };
+
+      const result = await createPaymentInPendingState(tx, data, meta);
+
+      expect(tx.payment.create).toHaveBeenCalledTimes(1);
+      expect(tx.payment.create).toHaveBeenCalledWith({
+        data: { ...data, status: S.CREATED },
+      });
+      expect(tx.payment.updateMany).toHaveBeenCalledWith({
+        where: { id: created.id, status: S.CREATED },
+        data: { status: S.PENDING },
+      });
+      expect(result).toBe(pending);
+      expect(tx).not.toHaveProperty('user');
+      expect(tx).not.toHaveProperty('subscription');
+      expect(tx).not.toHaveProperty('stripe');
+    });
+
+    test('does not allow caller data to override the created initial status', async () => {
+      const created = { id: 71, status: S.CREATED };
+      const pending = { ...created, status: S.PENDING };
+      const tx = {
+        payment: {
+          create: jest.fn().mockResolvedValue(created),
+          findUnique: jest
+            .fn()
+            .mockResolvedValueOnce(created)
+            .mockResolvedValueOnce(pending),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+      };
+
+      await createPaymentInPendingState(tx, {
+        userId: 13,
+        planTier: 'basico',
+        amount: 999,
+        idempotencyKey: 'initializer-override',
+        status: S.SUCCEEDED,
+      });
+
+      expect(tx.payment.create).toHaveBeenCalledWith({
+        data: {
+          userId: 13,
+          planTier: 'basico',
+          amount: 999,
+          idempotencyKey: 'initializer-override',
+          status: S.CREATED,
+        },
+      });
+    });
+
+    test('requires the caller to supply a Prisma transaction/client', async () => {
+      await expect(
+        createPaymentInPendingState(undefined, { userId: 14 })
+      ).rejects.toThrow('A Prisma transaction/client with payment.create is required');
     });
   });
 });

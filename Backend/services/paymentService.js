@@ -6,6 +6,7 @@ import { PLAN_TIERS, normalizePlanTier } from '../utils/plans.js';
 import {
   PAYMENT_STATUSES,
   applyTransition,
+  createPaymentInPendingState,
 } from './paymentStateMachine.js';
 
 const STRIPE_API_BASE = 'api.stripe.com';
@@ -93,6 +94,18 @@ export class PaymentIntentConflictError extends PaymentServiceError {
     });
     this.name = 'PaymentIntentConflictError';
     this.code = 'PAYMENT_INTENT_CONFLICT';
+  }
+}
+
+export class PaymentConfirmationConflictError extends PaymentServiceError {
+  constructor(currentStatus) {
+    super('Payment is not confirmable from its current status', {
+      statusCode: 409,
+      clientMessage: 'payment_already_processed',
+    });
+    this.name = 'PaymentConfirmationConflictError';
+    this.code = 'PAYMENT_CONFIRMATION_CONFLICT';
+    this.currentStatus = currentStatus;
   }
 }
 
@@ -260,6 +273,13 @@ const serializeMetadata = (metadata) => {
   if (typeof metadata === 'string') return metadata;
   return JSON.stringify(metadata);
 };
+
+const paymentInitializationMeta = ({ source, actorType, actorId, reason }) => ({
+  source,
+  actorType,
+  actorId,
+  reason,
+});
 
 /**
  * Persist a pending payment intent row. Idempotent on `idempotencyKey`.
@@ -1314,6 +1334,105 @@ export async function processPaymentIntentWebhookEvent({
   }
 }
 
+export async function createSimulatedPayment({
+  userId,
+  planTier,
+  idempotencyKey,
+}, { db = prisma } = {}) {
+  const normalizedPlan = assertPaidPlan(planTier);
+  const amount = PLAN_AMOUNTS[normalizedPlan] ?? 0;
+
+  return db.$transaction((tx) =>
+    createPaymentInPendingState(
+      tx,
+      {
+        userId,
+        planTier: normalizedPlan,
+        amount,
+        currency: 'usd',
+        provider: 'simulated',
+        idempotencyKey,
+      },
+      paymentInitializationMeta({
+        source: 'simulated_payment_api',
+        actorType: 'user',
+        actorId: userId,
+        reason: 'simulated payment initialized',
+      })
+    )
+  );
+}
+
+const activateSimulatedPaymentEntitlement = async (tx, { payment }) => {
+  const currentUser = await tx.user.findUnique({ where: { id: payment.userId } });
+  if (!currentUser) throw new Error('user_not_found');
+
+  return tx.user.update({
+    where: { id: payment.userId },
+    data: {
+      planTier: payment.planTier,
+      role: currentUser.role === 'admin' ? 'admin' : 'premium',
+    },
+  });
+};
+
+const simulatedConfirmationTarget = (status) => {
+  switch (status) {
+    case PAYMENT_STATUSES.CREATED:
+      return PAYMENT_STATUSES.PENDING;
+    case PAYMENT_STATUSES.PENDING:
+      return PAYMENT_STATUSES.PROCESSING;
+    case PAYMENT_STATUSES.PROCESSING:
+      return PAYMENT_STATUSES.SUCCEEDED;
+    default:
+      return null;
+  }
+};
+
+export async function confirmSimulatedPayment(
+  { paymentId, actorId },
+  {
+    db = prisma,
+    entitlementWriter = activateSimulatedPaymentEntitlement,
+    transitionPayment = applyTransition,
+  } = {}
+) {
+  return db.$transaction(async (tx) => {
+    let current = await tx.payment.findUnique({ where: { id: paymentId } });
+    if (!current) throw new PaymentNotFoundError();
+
+    for (let step = 0; step < 3; step += 1) {
+      const targetStatus = simulatedConfirmationTarget(current.status);
+      if (!targetStatus) {
+        throw new PaymentConfirmationConflictError(current.status);
+      }
+
+      const transition = await transitionPayment(tx, current.id, targetStatus, {
+        source: 'simulated_admin_confirmation',
+        actorType: 'admin',
+        actorId,
+        reason: 'administrator confirmed simulated payment',
+      });
+      current = transition.payment;
+
+      const wonSucceededTransition =
+        transition.applied === true &&
+        transition.previousStatus === PAYMENT_STATUSES.PROCESSING &&
+        transition.targetStatus === PAYMENT_STATUSES.SUCCEEDED;
+      if (wonSucceededTransition) {
+        await entitlementWriter(tx, { payment: current, actorId });
+        return current;
+      }
+
+      if (current.status === PAYMENT_STATUSES.SUCCEEDED) {
+        throw new PaymentConfirmationConflictError(current.status);
+      }
+    }
+
+    throw new PaymentConfirmationConflictError(current.status);
+  });
+}
+
 /** @deprecated Prefer markPaymentCompleted — kept for callers expecting status "processed". */
 export async function markPaymentProcessed({ paymentId }) {
   const result = await markPaymentCompleted({ paymentId });
@@ -1381,12 +1500,12 @@ const transitionCreatedPaymentToPending = async (tx, payment, userId) => {
     tx,
     payment.id,
     PAYMENT_STATUSES.PENDING,
-    {
+    paymentInitializationMeta({
       source: 'payment_api',
       actorType: 'user',
       actorId: userId,
       reason: 'payment initialized',
-    }
+    })
   );
   return transition.payment;
 };
@@ -1403,8 +1522,9 @@ const createOrLoadCommittedPayment = async ({ db, request }) => {
         return transitionCreatedPaymentToPending(tx, existing, request.userId);
       }
 
-      const created = await tx.payment.create({
-        data: {
+      return createPaymentInPendingState(
+        tx,
+        {
           userId: request.userId,
           amount: request.amount,
           currency: request.currency,
@@ -1413,11 +1533,14 @@ const createOrLoadCommittedPayment = async ({ db, request }) => {
           paymentMethodId: request.paymentMethodId,
           idempotencyKey: request.idempotencyKey,
           metadata: serializeMetadata({ source: 'payment_method' }),
-          status: PAYMENT_STATUSES.CREATED,
         },
-      });
-
-      return transitionCreatedPaymentToPending(tx, created, request.userId);
+        paymentInitializationMeta({
+          source: 'payment_api',
+          actorType: 'user',
+          actorId: request.userId,
+          reason: 'payment initialized',
+        })
+      );
     });
   } catch (error) {
     if (!isIdempotencyKeyUniqueViolation(error)) throw error;
@@ -1749,6 +1872,8 @@ export async function createCheckoutSession({ userId, plan }) {
 
 export default {
   createPaymentIntent,
+  createSimulatedPayment,
+  confirmSimulatedPayment,
   markPaymentCompleted,
   recordPaymentEvent,
   ensurePaymentEvent,
@@ -1767,6 +1892,7 @@ export default {
   PaymentNotFoundError,
   PaymentIdempotencyConflictError,
   PaymentIntentConflictError,
+  PaymentConfirmationConflictError,
   PaymentWebhookProcessingError,
   StripePaymentRequestError,
   StripePaymentIntentError,
