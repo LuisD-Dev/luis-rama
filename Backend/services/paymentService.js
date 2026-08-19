@@ -3,6 +3,10 @@ import https from 'https';
 import Stripe from 'stripe';
 import prisma from '../utils/prismaClient.js';
 import { PLAN_TIERS, normalizePlanTier } from '../utils/plans.js';
+import {
+  PAYMENT_STATUSES,
+  applyTransition,
+} from './paymentStateMachine.js';
 
 const STRIPE_API_BASE = 'api.stripe.com';
 
@@ -34,6 +38,13 @@ const SUBSCRIPTION_EVENT_TYPES = new Set([
   'customer.subscription.deleted',
 ]);
 
+const PAYMENT_INTENT_EVENT_TYPES = new Set([
+  'payment_intent.processing',
+  'payment_intent.succeeded',
+  'payment_intent.payment_failed',
+  'payment_intent.canceled',
+]);
+
 export class PaymentServiceError extends Error {
   constructor(message, { statusCode = 502, clientMessage } = {}) {
     super(message);
@@ -60,6 +71,67 @@ export class PaymentNotFoundError extends PaymentServiceError {
       clientMessage: 'Payment not found',
     });
     this.name = 'PaymentNotFoundError';
+  }
+}
+
+export class PaymentIdempotencyConflictError extends PaymentServiceError {
+  constructor() {
+    super('Payment idempotency key conflicts with the requested payment', {
+      statusCode: 409,
+      clientMessage: 'The idempotency key was already used for another payment request.',
+    });
+    this.name = 'PaymentIdempotencyConflictError';
+    this.code = 'PAYMENT_IDEMPOTENCY_CONFLICT';
+  }
+}
+
+export class PaymentIntentConflictError extends PaymentServiceError {
+  constructor() {
+    super('Payment already references a different Stripe PaymentIntent', {
+      statusCode: 409,
+      clientMessage: 'The payment conflicts with an existing Stripe payment intent.',
+    });
+    this.name = 'PaymentIntentConflictError';
+    this.code = 'PAYMENT_INTENT_CONFLICT';
+  }
+}
+
+export class PaymentWebhookProcessingError extends PaymentServiceError {
+  constructor(message, { code = 'PAYMENT_WEBHOOK_PROCESSING_FAILED', cause } = {}) {
+    super(message, {
+      statusCode: 500,
+      clientMessage: 'The payment webhook could not be processed.',
+    });
+    this.name = 'PaymentWebhookProcessingError';
+    this.code = code;
+    this.retryable = true;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+export class StripePaymentRequestError extends PaymentServiceError {
+  constructor(cause) {
+    super('Stripe PaymentIntent request did not return an authoritative result', {
+      statusCode: 502,
+      clientMessage: 'Payment processing is temporarily unavailable. Please try again.',
+    });
+    this.name = 'StripePaymentRequestError';
+    this.code = 'PAYMENT_PROVIDER_UNAVAILABLE';
+    this.retryable = true;
+    this.cause = cause;
+  }
+}
+
+export class StripePaymentIntentError extends PaymentServiceError {
+  constructor(cause) {
+    super('Stripe returned an unsuccessful authoritative PaymentIntent response', {
+      statusCode: 402,
+      clientMessage: 'The payment could not be completed.',
+    });
+    this.name = 'StripePaymentIntentError';
+    this.code = 'STRIPE_PAYMENT_INTENT_FAILED';
+    this.retryable = false;
+    this.cause = cause;
   }
 }
 
@@ -831,91 +903,706 @@ export async function findPaymentForStripeWebhook({
   return null;
 }
 
+const webhookProcessingError = (message, code, cause) =>
+  new PaymentWebhookProcessingError(message, { code, cause });
+
+const parseStripeMetadataPaymentId = (metadata) => {
+  if (!Object.prototype.hasOwnProperty.call(metadata || {}, 'paymentId')) {
+    return null;
+  }
+
+  const normalized = String(metadata.paymentId ?? '').trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw webhookProcessingError(
+      'Stripe PaymentIntent metadata.paymentId is malformed',
+      'PAYMENT_WEBHOOK_INVALID_METADATA'
+    );
+  }
+
+  const paymentId = Number(normalized);
+  if (!Number.isSafeInteger(paymentId) || paymentId <= 0) {
+    throw webhookProcessingError(
+      'Stripe PaymentIntent metadata.paymentId is outside the supported integer range',
+      'PAYMENT_WEBHOOK_INVALID_METADATA'
+    );
+  }
+  return paymentId;
+};
+
+const resolvePaymentIntentWebhookPayment = async (tx, paymentIntent) => {
+  const stripePaymentIntentId =
+    typeof paymentIntent?.id === 'string' ? paymentIntent.id.trim() : '';
+  if (!stripePaymentIntentId) {
+    throw webhookProcessingError(
+      'Stripe PaymentIntent event is missing a PaymentIntent id',
+      'PAYMENT_WEBHOOK_INVALID_PAYMENT_INTENT'
+    );
+  }
+
+  const metadataPaymentId = parseStripeMetadataPaymentId(
+    paymentIntent?.metadata || {}
+  );
+  const byStripePaymentIntentId = await tx.payment.findUnique({
+    where: { stripePaymentIntentId },
+  });
+  const byMetadataPaymentId = metadataPaymentId
+    ? await tx.payment.findUnique({ where: { id: metadataPaymentId } })
+    : null;
+
+  if (
+    byStripePaymentIntentId &&
+    byMetadataPaymentId &&
+    byStripePaymentIntentId.id !== byMetadataPaymentId.id
+  ) {
+    throw webhookProcessingError(
+      'Stripe PaymentIntent id and metadata.paymentId resolve to different payments',
+      'PAYMENT_WEBHOOK_IDENTITY_CONFLICT'
+    );
+  }
+
+  const payment = byStripePaymentIntentId || byMetadataPaymentId;
+  if (!payment) {
+    throw webhookProcessingError(
+      'No local Payment matches the Stripe PaymentIntent event',
+      'PAYMENT_WEBHOOK_PAYMENT_NOT_FOUND'
+    );
+  }
+  return { payment, stripePaymentIntentId };
+};
+
+const attachStripePaymentIntentIdentity = async (
+  tx,
+  payment,
+  stripePaymentIntentId
+) => {
+  if (
+    payment.stripePaymentIntentId &&
+    payment.stripePaymentIntentId !== stripePaymentIntentId
+  ) {
+    throw new PaymentIntentConflictError();
+  }
+  if (payment.stripePaymentIntentId === stripePaymentIntentId) return payment;
+
+  const attachment = await tx.payment.updateMany({
+    where: { id: payment.id, stripePaymentIntentId: null },
+    data: {
+      stripePaymentIntentId,
+      externalId: stripePaymentIntentId,
+    },
+  });
+  const attachedPayment = await tx.payment.findUnique({
+    where: { id: payment.id },
+  });
+  if (!attachedPayment) throw new PaymentNotFoundError();
+  if (
+    attachment.count !== 1 &&
+    attachedPayment.stripePaymentIntentId !== stripePaymentIntentId
+  ) {
+    throw new PaymentIntentConflictError();
+  }
+  return attachedPayment;
+};
+
+/**
+ * Apply the existing one-time-payment entitlement side effects. The caller
+ * must already have won the canonical processing -> succeeded transition.
+ */
+export async function activateOneTimePaymentEntitlement(
+  tx,
+  { payment, stripePaymentIntentId }
+) {
+  const now = new Date();
+  const periodEnd = new Date(now.getTime() + DEFAULT_PERIOD_MS);
+  const subscriptionExternalId =
+    stripePaymentIntentId ||
+    payment.externalId ||
+    payment.stripePaymentIntentId ||
+    `payment_${payment.id}`;
+  const provider = payment.provider || 'stripe';
+  const existingSubscription = await tx.subscription.findUnique({
+    where: {
+      provider_externalId: { provider, externalId: subscriptionExternalId },
+    },
+  });
+
+  if (
+    existingSubscription &&
+    existingSubscription.userId !== payment.userId
+  ) {
+    throw webhookProcessingError(
+      'The Stripe PaymentIntent is already attached to another user subscription',
+      'PAYMENT_WEBHOOK_SUBSCRIPTION_CONFLICT'
+    );
+  }
+
+  const subscription = existingSubscription
+    ? await tx.subscription.update({
+        where: { id: existingSubscription.id },
+        data: {
+          planTier: payment.planTier,
+          status: 'active',
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+        },
+      })
+    : await tx.subscription.create({
+        data: {
+          userId: payment.userId,
+          planTier: payment.planTier,
+          status: 'active',
+          provider,
+          externalId: subscriptionExternalId,
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+        },
+      });
+  const user = await applyUserEntitlements(tx, {
+    userId: payment.userId,
+    planTier: payment.planTier,
+    role: 'premium',
+  });
+  return { subscription, user };
+}
+
+const paymentIntentTransitionDecision = (eventType, status) => {
+  if (status === PAYMENT_STATUSES.CREATED) {
+    return { targetStatus: PAYMENT_STATUSES.PENDING };
+  }
+
+  switch (eventType) {
+    case 'payment_intent.processing':
+      if (status === PAYMENT_STATUSES.PENDING) {
+        return { targetStatus: PAYMENT_STATUSES.PROCESSING };
+      }
+      if (status === PAYMENT_STATUSES.PROCESSING) {
+        return { outcome: 'processed' };
+      }
+      if (
+        status === PAYMENT_STATUSES.SUCCEEDED ||
+        status === PAYMENT_STATUSES.FAILED ||
+        status === PAYMENT_STATUSES.CANCELED
+      ) {
+        return { outcome: 'ignored_terminal' };
+      }
+      break;
+
+    case 'payment_intent.succeeded':
+      if (status === PAYMENT_STATUSES.PENDING) {
+        return { targetStatus: PAYMENT_STATUSES.PROCESSING };
+      }
+      if (status === PAYMENT_STATUSES.PROCESSING) {
+        return { targetStatus: PAYMENT_STATUSES.SUCCEEDED };
+      }
+      if (status === PAYMENT_STATUSES.SUCCEEDED) {
+        return { outcome: 'already_succeeded' };
+      }
+      if (
+        status === PAYMENT_STATUSES.FAILED ||
+        status === PAYMENT_STATUSES.CANCELED
+      ) {
+        throw webhookProcessingError(
+          `A ${status} Payment cannot be resurrected by a success webhook`,
+          'PAYMENT_WEBHOOK_TERMINAL_CONFLICT'
+        );
+      }
+      break;
+
+    case 'payment_intent.payment_failed':
+      if (
+        status === PAYMENT_STATUSES.PENDING ||
+        status === PAYMENT_STATUSES.PROCESSING
+      ) {
+        return { targetStatus: PAYMENT_STATUSES.FAILED };
+      }
+      if (status === PAYMENT_STATUSES.FAILED) {
+        return { outcome: 'processed' };
+      }
+      if (
+        status === PAYMENT_STATUSES.SUCCEEDED ||
+        status === PAYMENT_STATUSES.CANCELED
+      ) {
+        return { outcome: 'ignored_terminal' };
+      }
+      break;
+
+    case 'payment_intent.canceled':
+      if (
+        status === PAYMENT_STATUSES.PENDING ||
+        status === PAYMENT_STATUSES.PROCESSING
+      ) {
+        return { targetStatus: PAYMENT_STATUSES.CANCELED };
+      }
+      if (status === PAYMENT_STATUSES.CANCELED) {
+        return { outcome: 'processed' };
+      }
+      if (
+        status === PAYMENT_STATUSES.SUCCEEDED ||
+        status === PAYMENT_STATUSES.FAILED
+      ) {
+        return { outcome: 'ignored_terminal' };
+      }
+      break;
+
+    default:
+      break;
+  }
+
+  throw webhookProcessingError(
+    `Cannot converge ${eventType} from local Payment status ${status}`,
+    'PAYMENT_WEBHOOK_STATE_CONFLICT'
+  );
+};
+
+const convergePaymentIntentWebhook = async (
+  tx,
+  { payment, eventType, stripeEventId, stripePaymentIntentId, entitlementWriter }
+) => {
+  let current = payment;
+  let wonSucceededTransition = false;
+
+  // A created success needs three legal edges plus one final observation. Each
+  // CAS result is explicitly re-evaluated against the returned current state.
+  for (let step = 0; step < 5; step += 1) {
+    const decision = paymentIntentTransitionDecision(eventType, current.status);
+    if (!decision.targetStatus) {
+      return {
+        payment: current,
+        outcome: wonSucceededTransition ? 'processed' : decision.outcome,
+        entitlementActivated: wonSucceededTransition,
+      };
+    }
+
+    const transition = await applyTransition(
+      tx,
+      current.id,
+      decision.targetStatus,
+      {
+        source: 'stripe_webhook',
+        actorType: 'system',
+        actorId: stripeEventId,
+        reason: `${eventType} received from Stripe`,
+      }
+    );
+    current = transition.payment;
+
+    const wonThisSucceededTransition =
+      transition.applied === true &&
+      transition.previousStatus === PAYMENT_STATUSES.PROCESSING &&
+      transition.targetStatus === PAYMENT_STATUSES.SUCCEEDED;
+    if (wonThisSucceededTransition) {
+      await entitlementWriter(tx, {
+        payment: transition.payment,
+        stripePaymentIntentId,
+      });
+      wonSucceededTransition = true;
+    }
+
+    switch (transition.outcome) {
+      case 'applied':
+      case 'already_at_target':
+      case 'state_changed':
+        // Re-evaluate the observed state and select its next legal edge.
+        break;
+      default:
+        throw webhookProcessingError(
+          `Unexpected payment transition outcome: ${transition.outcome}`,
+          'PAYMENT_WEBHOOK_TRANSITION_ERROR'
+        );
+    }
+  }
+
+  throw webhookProcessingError(
+    `Payment ${payment.id} did not converge for ${eventType}`,
+    'PAYMENT_WEBHOOK_CONVERGENCE_FAILED'
+  );
+};
+
+/**
+ * Atomically process one one-time Stripe PaymentIntent webhook delivery.
+ * Duplicate P2002 handling intentionally occurs outside the failed transaction.
+ */
+export async function processPaymentIntentWebhookEvent({
+  event,
+  db = prisma,
+  entitlementWriter = activateOneTimePaymentEntitlement,
+} = {}) {
+  const stripeEventId = event?.id;
+  const eventType = event?.type || 'stripe.unknown';
+
+  if (typeof stripeEventId !== 'string' || !stripeEventId.trim()) {
+    throw webhookProcessingError(
+      'Stripe webhook event is missing an id',
+      'PAYMENT_WEBHOOK_INVALID_EVENT'
+    );
+  }
+  if (typeof entitlementWriter !== 'function') {
+    throw new TypeError('entitlementWriter must be a function');
+  }
+
+  try {
+    return await db.$transaction(async (tx) => {
+      // This unique insert is the first domain write and the delivery claim.
+      // P2002 must escape because PostgreSQL aborts the transaction.
+      const paymentEvent = await tx.paymentEvent.create({
+        data: {
+          type: eventType,
+          payload: JSON.stringify(event),
+          idempotencyKey: `stripe:${stripeEventId}`,
+          stripeEventId,
+          outcome: 'processing',
+          processedAt: null,
+        },
+      });
+
+      if (!PAYMENT_INTENT_EVENT_TYPES.has(eventType)) {
+        await tx.paymentEvent.update({
+          where: { id: paymentEvent.id },
+          data: { outcome: 'ignored', processedAt: new Date() },
+        });
+        return { outcome: 'ignored', eventType, paymentId: null };
+      }
+
+      const resolved = await resolvePaymentIntentWebhookPayment(
+        tx,
+        event?.data?.object
+      );
+      const payment = await attachStripePaymentIntentIdentity(
+        tx,
+        resolved.payment,
+        resolved.stripePaymentIntentId
+      );
+      const result = await convergePaymentIntentWebhook(tx, {
+        payment,
+        eventType,
+        stripeEventId,
+        stripePaymentIntentId: resolved.stripePaymentIntentId,
+        entitlementWriter,
+      });
+
+      await tx.paymentEvent.update({
+        where: { id: paymentEvent.id },
+        data: {
+          paymentId: result.payment.id,
+          outcome: result.outcome,
+          processedAt: new Date(),
+        },
+      });
+      return {
+        outcome: result.outcome,
+        eventType,
+        paymentId: result.payment.id,
+        entitlementActivated: result.entitlementActivated,
+      };
+    });
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
+
+    // The failed transaction is over; use a fresh client and only recognize
+    // the exact committed Stripe delivery as a duplicate.
+    const committedEvent = await db.paymentEvent.findUnique({
+      where: { stripeEventId },
+    });
+    if (committedEvent?.stripeEventId === stripeEventId) {
+      return {
+        outcome: 'duplicate',
+        eventType,
+        paymentId: committedEvent.paymentId,
+        entitlementActivated: false,
+      };
+    }
+    throw error;
+  }
+}
+
 /** @deprecated Prefer markPaymentCompleted — kept for callers expecting status "processed". */
 export async function markPaymentProcessed({ paymentId }) {
   const result = await markPaymentCompleted({ paymentId });
   return result.payment;
 }
 
+const ONE_TIME_PAYMENT_CURRENCY = 'usd';
+const ONE_TIME_PAYMENT_PROVIDER = 'stripe';
+const RECOGNIZED_STRIPE_PAYMENT_INTENT_STATUSES = new Set([
+  'requires_payment_method',
+  'requires_confirmation',
+  'requires_action',
+  'processing',
+  'requires_capture',
+  'succeeded',
+  'canceled',
+]);
+const NON_RETRYABLE_STRIPE_ERROR_STATUSES = new Set([
+  'requires_payment_method',
+  'canceled',
+]);
+const NON_RETRIABLE_PAYMENT_STATUSES = new Set([
+  PAYMENT_STATUSES.SUCCEEDED,
+  PAYMENT_STATUSES.FAILED,
+  PAYMENT_STATUSES.CANCELED,
+  // Read-only compatibility until the status data migration runs.
+  'completed',
+  'processed',
+]);
+
+const assertIdempotentPaymentMatches = (
+  payment,
+  { userId, planTier, amount, currency, provider, paymentMethodId }
+) => {
+  const matches =
+    payment.userId === userId &&
+    payment.planTier === planTier &&
+    Number(payment.amount) === amount &&
+    payment.currency === currency &&
+    payment.provider === provider &&
+    (payment.paymentMethodId ?? null) === (paymentMethodId ?? null);
+
+  if (!matches) throw new PaymentIdempotencyConflictError();
+  return payment;
+};
+
+const isIdempotencyKeyUniqueViolation = (error) => {
+  if (error?.code !== 'P2002') return false;
+
+  const rawTarget = error?.meta?.target;
+  const targets = Array.isArray(rawTarget) ? rawTarget : [rawTarget];
+  return targets.some((target) => {
+    const normalized = String(target || '').toLowerCase();
+    return (
+      normalized.includes('idempotencykey') ||
+      normalized.includes('idempotency_key')
+    );
+  });
+};
+
+const transitionCreatedPaymentToPending = async (tx, payment, userId) => {
+  if (payment.status !== PAYMENT_STATUSES.CREATED) return payment;
+
+  const transition = await applyTransition(
+    tx,
+    payment.id,
+    PAYMENT_STATUSES.PENDING,
+    {
+      source: 'payment_api',
+      actorType: 'user',
+      actorId: userId,
+      reason: 'payment initialized',
+    }
+  );
+  return transition.payment;
+};
+
+const createOrLoadCommittedPayment = async ({ db, request }) => {
+  try {
+    return await db.$transaction(async (tx) => {
+      const existing = await tx.payment.findUnique({
+        where: { idempotencyKey: request.idempotencyKey },
+      });
+
+      if (existing) {
+        assertIdempotentPaymentMatches(existing, request);
+        return transitionCreatedPaymentToPending(tx, existing, request.userId);
+      }
+
+      const created = await tx.payment.create({
+        data: {
+          userId: request.userId,
+          amount: request.amount,
+          currency: request.currency,
+          planTier: request.planTier,
+          provider: request.provider,
+          paymentMethodId: request.paymentMethodId,
+          idempotencyKey: request.idempotencyKey,
+          metadata: serializeMetadata({ source: 'payment_method' }),
+          status: PAYMENT_STATUSES.CREATED,
+        },
+      });
+
+      return transitionCreatedPaymentToPending(tx, created, request.userId);
+    });
+  } catch (error) {
+    if (!isIdempotencyKeyUniqueViolation(error)) throw error;
+
+    // The failed transaction has rolled back. Re-query through the normal
+    // Prisma client rather than attempting to continue with its aborted tx.
+    const raced = await db.payment.findUnique({
+      where: { idempotencyKey: request.idempotencyKey },
+    });
+    if (!raced) throw error;
+
+    return assertIdempotentPaymentMatches(raced, request);
+  }
+};
+
+const nextTransitionForStripeStatus = (localStatus, stripeStatus) => {
+  if (localStatus === PAYMENT_STATUSES.PENDING) {
+    switch (stripeStatus) {
+      case 'processing':
+      case 'requires_capture':
+      case 'succeeded':
+        return PAYMENT_STATUSES.PROCESSING;
+      case 'requires_payment_method':
+        return PAYMENT_STATUSES.FAILED;
+      case 'canceled':
+        return PAYMENT_STATUSES.CANCELED;
+      default:
+        return null;
+    }
+  }
+
+  if (localStatus === PAYMENT_STATUSES.PROCESSING) {
+    if (stripeStatus === 'requires_payment_method') {
+      return PAYMENT_STATUSES.FAILED;
+    }
+    if (stripeStatus === 'canceled') {
+      return PAYMENT_STATUSES.CANCELED;
+    }
+  }
+
+  return null;
+};
+
+const hasStripePaymentIntentId = (stripeIntent) =>
+  typeof stripeIntent?.id === 'string' && stripeIntent.id.trim().length > 0;
+
+const hasAuthoritativeStripePaymentIntentStatus = (stripeIntent) =>
+  hasStripePaymentIntentId(stripeIntent) &&
+  typeof stripeIntent?.status === 'string' &&
+  RECOGNIZED_STRIPE_PAYMENT_INTENT_STATUSES.has(stripeIntent.status);
+
+const convergePaymentIntentStatus = async (tx, payment, stripeStatus) => {
+  let current = payment;
+
+  // A CAS miss is re-evaluated against the newly observed state. At most two
+  // forward machine edges are relevant to any PaymentIntent response here.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const nextStatus = nextTransitionForStripeStatus(current.status, stripeStatus);
+    if (!nextStatus) return current;
+
+    const transition = await applyTransition(tx, current.id, nextStatus, {
+      source: 'payment_api',
+      actorType: 'user',
+      actorId: current.userId,
+      reason: `Stripe PaymentIntent status: ${stripeStatus}`,
+    });
+    current = transition.payment;
+
+    if (transition.outcome !== 'state_changed') return current;
+  }
+
+  return current;
+};
+
+const attachPaymentIntentAndConverge = async ({ db, paymentId, stripeIntent }) =>
+  db.$transaction(async (tx) => {
+    let payment = await tx.payment.findUnique({ where: { id: paymentId } });
+    if (!payment) throw new PaymentNotFoundError();
+    payment = await attachStripePaymentIntentIdentity(
+      tx,
+      payment,
+      stripeIntent.id
+    );
+
+    if (!hasAuthoritativeStripePaymentIntentStatus(stripeIntent)) {
+      return payment;
+    }
+
+    return convergePaymentIntentStatus(tx, payment, stripeIntent.status);
+  });
+
+const paymentIntentFromStripeError = (error) =>
+  error?.error?.payment_intent || error?.payment_intent || null;
+
 export async function createOrReusePayment({
   userId,
   paymentMethodId,
   planTier,
   idempotencyKey,
-}) {
+}, { db = prisma, requestStripe } = {}) {
   if (!idempotencyKey) throw new Error('idempotencyKey required');
 
   const normalizedPlan = assertPaidPlan(planTier);
   const amount = PLAN_AMOUNTS[normalizedPlan] ?? 0;
-  const stripeSecret = getStripeSecret();
+  const request = {
+    userId,
+    paymentMethodId,
+    planTier: normalizedPlan,
+    amount,
+    currency: ONE_TIME_PAYMENT_CURRENCY,
+    provider: ONE_TIME_PAYMENT_PROVIDER,
+    idempotencyKey,
+  };
 
-  return prisma.$transaction(async (tx) => {
-    const payment = await createPaymentIntent({
-      userId,
-      planTier: normalizedPlan,
-      amount,
-      currency: 'usd',
-      provider: 'stripe',
-      paymentMethodId,
-      idempotencyKey,
-      metadata: { source: 'payment_method' },
-      tx,
-    });
+  // Transaction A has fully committed before this await resolves. No Stripe
+  // request is reachable from createOrLoadCommittedPayment.
+  const payment = await createOrLoadCommittedPayment({ db, request });
 
-    if (payment.stripePaymentIntentId) {
-      return payment;
-    }
+  if (payment.stripePaymentIntentId) return payment;
+  if (NON_RETRIABLE_PAYMENT_STATUSES.has(payment.status)) return payment;
 
-    try {
-      if (!stripeSecret && process.env.NODE_ENV === 'test') {
-        const stripeId = `test_pi_${payment.id}_${Date.now()}`;
-        return tx.payment.update({
-          where: { id: payment.id },
-          data: { stripePaymentIntentId: stripeId, externalId: stripeId },
-        });
-      }
+  const body = {
+    amount: String(amount),
+    currency: ONE_TIME_PAYMENT_CURRENCY,
+    payment_method: paymentMethodId,
+    confirm: 'true',
+    'metadata[paymentId]': String(payment.id),
+    'metadata[idempotencyKey]': idempotencyKey,
+  };
 
-      const body = {
-        amount: String(amount),
-        currency: 'usd',
-        payment_method: paymentMethodId,
-        confirm: 'true',
-        'metadata[paymentId]': String(payment.id),
-        'metadata[idempotencyKey]': idempotencyKey,
+  let stripeIntent;
+  let stripeError = null;
+  try {
+    if (!requestStripe && !getStripeSecret() && process.env.NODE_ENV === 'test') {
+      stripeIntent = {
+        id: `test_pi_${payment.id}_${Date.now()}`,
+        status: 'requires_confirmation',
       };
-
-      const res = await stripeRequest({
+    } else {
+      stripeIntent = await (requestStripe || stripeRequest)({
         path: '/v1/payment_intents',
         body,
         idempotencyKey,
       });
-      const stripeId = res.id;
-
-      const updated = await tx.payment.update({
-        where: { id: payment.id },
-        data: { stripePaymentIntentId: stripeId, externalId: stripeId },
-      });
-
-      console.info(
-        {
-          userId,
-          paymentId: updated.id,
-          stripePaymentIntentId: stripeId,
-          idempotencyKey,
-          outcome: 'processed',
-          timestamp: new Date().toISOString(),
-        },
-        'Stripe payment intent created'
-      );
-
-      return updated;
-    } catch (err) {
-      await tx.payment
-        .update({ where: { id: payment.id }, data: { status: 'failed' } })
-        .catch(() => {});
-      throw err;
     }
+  } catch (error) {
+    stripeError = error;
+    stripeIntent = paymentIntentFromStripeError(error);
+  }
+
+  if (!hasStripePaymentIntentId(stripeIntent)) {
+    throw new StripePaymentRequestError(stripeError || stripeIntent);
+  }
+
+  // Transaction B attaches the Stripe identity with a null-only CAS and then
+  // advances only through canonical state-machine edges.
+  const updated = await attachPaymentIntentAndConverge({
+    db,
+    paymentId: payment.id,
+    stripeIntent,
   });
+
+  console.info(
+    {
+      userId,
+      paymentId: updated.id,
+      stripePaymentIntentId: stripeIntent.id,
+      idempotencyKey,
+      stripeStatus: stripeIntent.status || null,
+      outcome: updated.status,
+      timestamp: new Date().toISOString(),
+    },
+    'Stripe payment intent created'
+  );
+
+  if (!hasAuthoritativeStripePaymentIntentStatus(stripeIntent)) {
+    throw new StripePaymentRequestError(stripeError || stripeIntent);
+  }
+  if (stripeError) {
+    if (NON_RETRYABLE_STRIPE_ERROR_STATUSES.has(stripeIntent.status)) {
+      throw new StripePaymentIntentError(stripeError);
+    }
+    throw new StripePaymentRequestError(stripeError);
+  }
+  return updated;
 }
 
 /**
@@ -1073,7 +1760,14 @@ export default {
   getStripeClient,
   constructStripeEvent,
   processStripeWebhookEvent,
+  processPaymentIntentWebhookEvent,
+  activateOneTimePaymentEntitlement,
   PaymentServiceError,
   InvalidPlanError,
   PaymentNotFoundError,
+  PaymentIdempotencyConflictError,
+  PaymentIntentConflictError,
+  PaymentWebhookProcessingError,
+  StripePaymentRequestError,
+  StripePaymentIntentError,
 };
