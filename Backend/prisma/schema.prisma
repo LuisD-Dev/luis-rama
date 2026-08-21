@@ -54,7 +54,7 @@ model Payment {
   amount                  Int
   currency                String    @default("usd")
   planTier                String    @map("plan_tier")
-  status                  String    @default("pending")
+  status                  String    @default("created")
   provider                String    @default("stripe")
   externalId              String?   @map("external_id")
   paymentMethodId         String?   @map("payment_method_id")

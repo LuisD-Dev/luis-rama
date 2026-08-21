@@ -125,18 +125,18 @@ export const getAdminStats = async (req, res) => {
 
   const pendingRequests = 0; // Placeholder — implement when a requests model exists
 
-  // Revenue is now computed from completed payment records only.
+  // During rollout, successful rows include succeeded, completed, and processed.
   // Use `paidAt` when available, otherwise fallback to `createdAt`.
-  const revenueThisMonth = sumCompletedPaymentsForCurrentMonth();
-  const revenueLastMonth = sumCompletedPaymentsForPreviousMonth();
+  const revenueThisMonth = sumSuccessfulPaymentsForCurrentMonth();
+  const revenueLastMonth = sumSuccessfulPaymentsForPreviousMonth();
   const revenueChange = revenueLastMonth > 0
     ? Number((((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100).toFixed(2))
     : (revenueThisMonth > 0 ? 100 : 0);
 
   const activeSubscriptions = {
-    basico: countUsersWhoseLatestCompletedPaymentIs('basico'),
-    pro: countUsersWhoseLatestCompletedPaymentIs('pro'),
-    master: countUsersWhoseLatestCompletedPaymentIs('master'),
+    basico: countUsersWhoseLatestSuccessfulPaymentIs('basico'),
+    pro: countUsersWhoseLatestSuccessfulPaymentIs('pro'),
+    master: countUsersWhoseLatestSuccessfulPaymentIs('master'),
   };
 
   res.json({
@@ -158,9 +158,9 @@ export const getAdminStats = async (req, res) => {
 Implementation status in this repository:
 
 - `GET /api/admin/stats` is implemented in `controllers/statsController.js` and protected by `verifyToken` + `adminOnly`.
-- Revenue metrics are calculated from `Payment` records with `status = 'completed'` only.
+- During rollout, revenue metrics count `succeeded` plus legacy `completed` and `processed` Payment rows.
 - Month-over-month comparison is based on current month vs previous month boundaries.
-- Active subscriptions are grouped by plan tier from each user's latest completed payment.
+- Active subscriptions are grouped by plan tier from each user's latest successful Payment across the same rollout-compatible status set.
 
 **Mount in `app.js` (or `server.js`):**
 ```javascript

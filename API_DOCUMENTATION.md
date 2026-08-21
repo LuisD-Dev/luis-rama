@@ -216,7 +216,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
   - Description: Admin-only dashboard metrics with payment-based revenue and active subscriptions by tier.
   - Auth required: Yes
   - Role: admin only
-  - Revenue source: only `completed` payment records from `payments` table.
+  - Revenue source during status rollout: `succeeded`, plus legacy `completed` and `processed` Payment rows until operator migration is complete.
   - Response example:
 
 ```json
@@ -309,6 +309,19 @@ Same-state observations are idempotent no-ops. Illegal transitions return a cont
 
 `completed` and `processed` are legacy persisted success values only; they are not canonical statuses. The runtime temporarily recognizes them in read-only compatibility checks until the outstanding data migration is rolled out. This documentation does not imply that existing rows have already been migrated.
 
+### Legacy status operator rollout
+
+The Prisma schema source now defaults new `Payment.status` values to `created`. This source change does not alter the default of an already-existing database by itself.
+
+The shared Prisma migration history contains a pre-existing duplicate Payment-table migration at `20260725120000_add_payments`. This rollout deliberately does not edit historical migration checksums, run `prisma migrate resolve`, or repair the broader migration chain. Legacy row conversion is instead provided as an explicit, idempotent operator command:
+
+```bash
+npm run payment-status:migrate:dry-run
+npm run payment-status:migrate
+```
+
+Run the dry run first against the target database. The apply command converts only `completed` and `processed` to `succeeded`; unknown noncanonical values remain unchanged and cause a nonzero exit.
+
 ### Exactly-once success effects
 
 Entitlement activation may occur only for the execution that actually wins the compare-and-set transition from `processing` to `succeeded`. Merely observing an already-succeeded Payment never reactivates entitlement. This rule covers duplicate webhook delivery, repeated admin confirmation, distinct success deliveries, and concurrent success processing.
@@ -341,7 +354,7 @@ All runtime `Payment.status` writes go through `Backend/services/paymentStateMac
 | `plan_tier` | String | `basico` \| `pro` \| `master` |
 | `amount` | Int | Amount in cents |
 | `currency` | String | Default `usd` |
-| `status` | String | Canonical: `created` \| `pending` \| `processing` \| `succeeded` \| `failed` \| `canceled`; legacy persisted success values may still be `completed` or `processed` pending migration |
+| `status` | String | Source default `created`. Canonical: `created` \| `pending` \| `processing` \| `succeeded` \| `failed` \| `canceled`; legacy persisted success values may still be `completed` or `processed` pending operator migration |
 | `provider` | String | Default `stripe` |
 | `external_id` | String? | Provider payment/session id |
 | `idempotency_key` | String UNIQUE | Prevents duplicate intents |
