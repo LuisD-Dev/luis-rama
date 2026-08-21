@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS payments (
   amount INTEGER NOT NULL,
   currency TEXT NOT NULL DEFAULT 'usd',
   plan_tier TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
+  status TEXT NOT NULL DEFAULT 'created',
   provider TEXT NOT NULL DEFAULT 'stripe',
   external_id TEXT,
   payment_method_id TEXT,

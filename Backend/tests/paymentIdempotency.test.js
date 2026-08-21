@@ -4,6 +4,10 @@ import crypto from 'crypto';
 import app from '../app.js';
 import { setupTestDb } from './helpers/db.setup.js';
 import prisma from '../utils/prismaClient.js';
+import {
+  PAYMENT_STATUSES,
+  applyTransition,
+} from '../services/paymentStateMachine.js';
 
 setupTestDb();
 
@@ -437,6 +441,80 @@ describe('Payment idempotency', () => {
       ).resolves.toMatchObject({ planTier: null, role: 'student' });
     }
   );
+
+  test('failed payment requires trusted reconciliation and a new success event before entitlement', async () => {
+    const paymentIntentId = 'pi_failed_reconcile_success';
+    const payment = await createLocalPayment({ stripePaymentIntentId: paymentIntentId });
+    const failureEvent = paymentIntentEvent({
+      id: 'evt_failed_before_reconcile',
+      type: 'payment_intent.payment_failed',
+      paymentIntentId,
+      paymentId: payment.id,
+    });
+
+    expect((await postOneTimeWebhook(failureEvent)).statusCode).toBe(200);
+    await expect(
+      prisma.payment.findUnique({ where: { id: payment.id } })
+    ).resolves.toMatchObject({ status: PAYMENT_STATUSES.FAILED });
+    await expect(
+      prisma.user.findUnique({ where: { id: testUserId } })
+    ).resolves.toMatchObject({ planTier: null, role: 'student' });
+    expect(await prisma.subscription.count({ where: { userId: testUserId } })).toBe(0);
+
+    const forbiddenSuccessEvent = paymentIntentEvent({
+      id: 'evt_success_while_still_failed',
+      paymentIntentId,
+      paymentId: payment.id,
+    });
+    expect((await postOneTimeWebhook(forbiddenSuccessEvent)).statusCode).toBe(500);
+    await expect(
+      prisma.payment.findUnique({ where: { id: payment.id } })
+    ).resolves.toMatchObject({ status: PAYMENT_STATUSES.FAILED });
+    await expect(
+      prisma.paymentEvent.findUnique({ where: { stripeEventId: forbiddenSuccessEvent.id } })
+    ).resolves.toBeNull();
+
+    const reconciliation = await applyTransition(
+      prisma,
+      payment.id,
+      PAYMENT_STATUSES.PENDING,
+      {
+        retryKind: 'reconcile',
+        source: 'system_reconcile',
+        actorType: 'system',
+        reason: 'Stripe retry was explicitly verified',
+      }
+    );
+    expect(reconciliation).toMatchObject({
+      applied: true,
+      previousStatus: PAYMENT_STATUSES.FAILED,
+      targetStatus: PAYMENT_STATUSES.PENDING,
+    });
+    await expect(
+      prisma.payment.findUnique({ where: { id: payment.id } })
+    ).resolves.toMatchObject({ status: PAYMENT_STATUSES.PENDING });
+    await expect(
+      prisma.user.findUnique({ where: { id: testUserId } })
+    ).resolves.toMatchObject({ planTier: null, role: 'student' });
+    expect(await prisma.subscription.count({ where: { userId: testUserId } })).toBe(0);
+
+    const retriedSuccessEvent = paymentIntentEvent({
+      id: 'evt_success_after_trusted_reconcile',
+      paymentIntentId,
+      paymentId: payment.id,
+    });
+    expect((await postOneTimeWebhook(retriedSuccessEvent)).statusCode).toBe(200);
+    await expect(
+      prisma.payment.findUnique({ where: { id: payment.id } })
+    ).resolves.toMatchObject({ status: PAYMENT_STATUSES.SUCCEEDED });
+    await expect(
+      prisma.user.findUnique({ where: { id: testUserId } })
+    ).resolves.toMatchObject({ planTier: 'pro', role: 'premium' });
+    expect(await prisma.subscription.count({ where: { userId: testUserId } })).toBe(1);
+
+    expect((await postOneTimeWebhook(retriedSuccessEvent)).statusCode).toBe(200);
+    expect(await prisma.subscription.count({ where: { userId: testUserId } })).toBe(1);
+  }, 20000);
 
   test('failure and cancellation events after success are committed as ignored_terminal without regression', async () => {
     const payment = await createLocalPayment({

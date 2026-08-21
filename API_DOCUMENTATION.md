@@ -309,18 +309,20 @@ Same-state observations are idempotent no-ops. Illegal transitions return a cont
 
 `completed` and `processed` are legacy persisted success values only; they are not canonical statuses. The runtime temporarily recognizes them in read-only compatibility checks until the outstanding data migration is rolled out. This documentation does not imply that existing rows have already been migrated.
 
-### Legacy status operator rollout
+### Legacy status migration and operator fallback
 
 The Prisma schema source now defaults new `Payment.status` values to `created`. This source change does not alter the default of an already-existing database by itself.
 
-The shared Prisma migration history contains a pre-existing duplicate Payment-table migration at `20260725120000_add_payments`. This rollout deliberately does not edit historical migration checksums, run `prisma migrate resolve`, or repair the broader migration chain. Legacy row conversion is instead provided as an explicit, idempotent operator command:
+The standard migration path includes the data-only migration `Backend/prisma/migrations/20260821010000_canonical_payment_statuses/migration.sql`, which idempotently converts persisted `completed` and `processed` values to `succeeded`. Its presence does not imply that it has already run against production data.
+
+The shared Prisma migration history still contains a pre-existing duplicate Payment-table migration at `20260725120000_add_payments`. This change does not edit historical migration checksums, run `prisma migrate resolve`, or repair that broader migration chain. Because the chain may prevent standard migration execution in some environments, the explicit operator utility remains available as a safe fallback:
 
 ```bash
 npm run payment-status:migrate:dry-run
 npm run payment-status:migrate
 ```
 
-Run the dry run first against the target database. The apply command converts only `completed` and `processed` to `succeeded`; unknown noncanonical values remain unchanged and cause a nonzero exit.
+Run the fallback dry run first against the target database. The apply command converts only `completed` and `processed` to `succeeded`; unknown noncanonical values remain unchanged and cause a nonzero exit. The Prisma data migration and operator utility have distinct standard/fallback roles.
 
 ### Exactly-once success effects
 
@@ -392,7 +394,7 @@ Created/activated in the same transaction as successful Payment processing, and 
 | `stripe_event_id` | String? UNIQUE | Stripe delivery idempotency boundary |
 | `outcome` | String? | Processing result, for example `processing`, `processed`, `ignored`, or an idempotent/terminal observation |
 
-Migrations: forward `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`, reverse `.../down.sql` (also mirrored under `Backend/db/migrations/`).
+Payment audit migration: `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`. Canonical status data migration: `Backend/prisma/migrations/20260821010000_canonical_payment_statuses/migration.sql`.
 ----
 
 Notes and mapping

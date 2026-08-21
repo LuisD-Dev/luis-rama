@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import { readFile } from 'fs/promises';
 import prisma from '../utils/prismaClient.js';
 import { setupTestDb } from './helpers/db.setup.js';
 import {
@@ -36,6 +37,54 @@ const seedPayments = async (statuses) => {
 };
 
 describe('legacy Payment.status migration utility', () => {
+  test('actual Prisma data migration converts only legacy statuses and is idempotent', async () => {
+    const payments = await seedPayments([
+      'created',
+      'pending',
+      'processing',
+      'succeeded',
+      'failed',
+      'canceled',
+      'completed',
+      'processed',
+    ]);
+    const migrationSql = await readFile(
+      new URL(
+        '../prisma/migrations/20260821010000_canonical_payment_statuses/migration.sql',
+        import.meta.url
+      ),
+      'utf8'
+    );
+    const executableStatements = migrationSql
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    expect(executableStatements).toHaveLength(1);
+
+    await prisma.$executeRawUnsafe(migrationSql);
+    const afterFirst = await prisma.payment.findMany({
+      where: { id: { in: payments.map((payment) => payment.id) } },
+      orderBy: { id: 'asc' },
+    });
+    expect(afterFirst.map((payment) => payment.status)).toEqual([
+      'created',
+      'pending',
+      'processing',
+      'succeeded',
+      'failed',
+      'canceled',
+      'succeeded',
+      'succeeded',
+    ]);
+
+    await prisma.$executeRawUnsafe(migrationSql);
+    const afterSecond = await prisma.payment.findMany({
+      where: { id: { in: payments.map((payment) => payment.id) } },
+      orderBy: { id: 'asc' },
+    });
+    expect(afterSecond).toEqual(afterFirst);
+  });
+
   test('dry run reports legacy counts and changes no rows', async () => {
     const payments = await seedPayments([
       'created',

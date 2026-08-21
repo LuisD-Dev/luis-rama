@@ -993,7 +993,7 @@ async function handleSubscriptionDeleted(tx, sub) {
  * Idempotency relies on the `payment_events.stripe_event_id` UNIQUE constraint
  * (caught as P2002) rather than a prior findFirst, to avoid a check-then-insert race.
  */
-export async function processStripeWebhookEvent(event) {
+export async function processStripeWebhookEvent(event, { db = prisma } = {}) {
   const stripeEventId = event?.id;
   const eventType = event?.type;
 
@@ -1004,10 +1004,9 @@ export async function processStripeWebhookEvent(event) {
     });
   }
 
-  return prisma.$transaction(async (tx) => {
-    let paymentEvent;
-    try {
-      paymentEvent = await tx.paymentEvent.create({
+  try {
+    return await db.$transaction(async (tx) => {
+      const paymentEvent = await tx.paymentEvent.create({
         data: {
           type: eventType,
           payload: JSON.stringify(event),
@@ -1017,50 +1016,55 @@ export async function processStripeWebhookEvent(event) {
           processedAt: null,
         },
       });
-    } catch (err) {
-      if (err?.code === 'P2002') {
-        return { outcome: 'duplicate', eventType };
-      }
-      throw err;
-    }
 
-    if (!SUBSCRIPTION_EVENT_TYPES.has(eventType)) {
+      if (!SUBSCRIPTION_EVENT_TYPES.has(eventType)) {
+        await tx.paymentEvent.update({
+          where: { id: paymentEvent.id },
+          data: { outcome: 'ignored', processedAt: new Date() },
+        });
+        return { outcome: 'ignored', eventType };
+      }
+
+      const object = event.data?.object || {};
+      let result;
+      switch (eventType) {
+        case 'checkout.session.completed':
+          result = await handleCheckoutSessionCompleted(tx, object);
+          break;
+        case 'invoice.paid':
+          result = await handleInvoicePaid(tx, object);
+          break;
+        case 'invoice.payment_failed':
+          result = await handleInvoicePaymentFailed(tx, object);
+          break;
+        case 'customer.subscription.updated':
+          result = await handleSubscriptionUpdated(tx, object);
+          break;
+        case 'customer.subscription.deleted':
+          result = await handleSubscriptionDeleted(tx, object);
+          break;
+        default:
+          result = { outcome: 'ignored' };
+      }
+
       await tx.paymentEvent.update({
         where: { id: paymentEvent.id },
-        data: { outcome: 'ignored', processedAt: new Date() },
+        data: { outcome: result.outcome, processedAt: new Date() },
       });
-      return { outcome: 'ignored', eventType };
-    }
 
-    const object = event.data?.object || {};
-    let result;
-    switch (eventType) {
-      case 'checkout.session.completed':
-        result = await handleCheckoutSessionCompleted(tx, object);
-        break;
-      case 'invoice.paid':
-        result = await handleInvoicePaid(tx, object);
-        break;
-      case 'invoice.payment_failed':
-        result = await handleInvoicePaymentFailed(tx, object);
-        break;
-      case 'customer.subscription.updated':
-        result = await handleSubscriptionUpdated(tx, object);
-        break;
-      case 'customer.subscription.deleted':
-        result = await handleSubscriptionDeleted(tx, object);
-        break;
-      default:
-        result = { outcome: 'ignored' };
-    }
-
-    await tx.paymentEvent.update({
-      where: { id: paymentEvent.id },
-      data: { outcome: result.outcome, processedAt: new Date() },
+      return { outcome: result.outcome, eventType };
     });
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
 
-    return { outcome: result.outcome, eventType };
-  });
+    const committedEvent = await db.paymentEvent.findUnique({
+      where: { stripeEventId },
+    });
+    if (committedEvent?.stripeEventId === stripeEventId) {
+      return { outcome: 'duplicate', eventType };
+    }
+    throw error;
+  }
 }
 
 export async function findPaymentForStripeWebhook({
