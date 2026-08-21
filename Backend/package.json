@@ -17,6 +17,7 @@
     "prisma:studio": "prisma studio",
     "migrate:plan-tiers": "node scripts/migrations/migrate-premium-plan-tier.js",
     "migrate:plan-tiers:dry-run": "node scripts/migrations/migrate-premium-plan-tier.js --dry-run",
+    "payments:reconcile": "node scripts/reconcilePayments.js",
     "postinstall": "prisma generate"
   },
   "keywords": [
