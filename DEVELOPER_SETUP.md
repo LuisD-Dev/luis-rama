@@ -170,6 +170,88 @@ npm start
 node ./scripts/purge_non_admins.js
 ```
 
+## 11.1) Payment Reconciliation Runbook
+
+Stripe webhooks are the primary way `Payment` rows move from `pending` to `completed`. Webhooks can be lost — a deploy restarts the server mid-delivery, the handler 500s, `STRIPE_WEBHOOK_SECRET` gets rotated without updating the Dashboard, or Stripe simply can't reach the endpoint for a while. When that happens, Stripe's own record of a `PaymentIntent` is the source of truth and the local `Payment` row silently drifts out of sync. `npm run payments:reconcile` (`Backend/scripts/reconcilePayments.js`, backed by `Backend/services/paymentReconcileService.js`) detects and repairs that drift.
+
+It complements, not replaces, the webhook handlers in [routes/webhooks.js](Backend/routes/webhooks.js) and [controllers/paymentsController.js](Backend/controllers/paymentsController.js) — run it after an incident, not instead of fixing webhook delivery.
+
+### When to run it
+
+- After any incident where webhook delivery may have been interrupted (deploy, 500s in the logs for `/api/payments/webhook` or `/api/webhooks/stripe`, a rotated `STRIPE_WEBHOOK_SECRET`).
+- On a schedule as a safety net (see "Scheduling" below) — this tool has no built-in scheduler.
+- Ad hoc, when a user reports "I paid but I don't have access" — use `--payment-id`.
+
+### Flags
+
+| Flag | Description |
+| --- | --- |
+| `--since` | Time window to scan, e.g. `24h`, `7d`, `30m`. Required unless `--payment-id` is given. |
+| `--limit` | Maximum number of candidates to process (default 50). |
+| `--payment-id` | Reconcile a single `Payment` row by id, ignoring `--since`/`--limit`. |
+| `--dry-run` | Explicit no-op flag — dry-run is already the default. Never writes to the database. |
+| `--apply` | Actually repair the mismatches found. Without it, the command always behaves as `--dry-run`. |
+
+### Dry-run (safe, default)
+
+```bash
+cd Backend
+npm run payments:reconcile -- --since=24h --dry-run
+```
+
+Prints a table of every payment checked (local status vs. Stripe status) and a JSON summary. Makes zero writes — no `Payment` updates, no `PaymentEvent` rows.
+
+### Apply (repairs divergences)
+
+```bash
+cd Backend
+npm run payments:reconcile -- --since=7d --apply --limit=100
+npm run payments:reconcile -- --payment-id=123 --apply
+```
+
+Requires `STRIPE_SECRET_KEY`. If `NODE_ENV=production`, it additionally refuses to run unless `RECONCILE_CONFIRM=YES` is set for that invocation:
+
+```bash
+RECONCILE_CONFIRM=YES npm run payments:reconcile -- --since=24h --apply --limit=200
+```
+
+Only four Stripe `PaymentIntent` statuses are ever acted on (`succeeded`, `canceled`, `requires_payment_method`, `requires_action` — see the mapping table in `paymentReconcileService.js`). Anything else is left untouched: the tool never guesses at an in-flight payment. Entitlements only move on the two conclusive ends of that mapping:
+
+- `succeeded` — grants/ensures `planTier` and premium access (via `markPaymentCompleted`, the same function the webhook handler uses).
+- `canceled` — if the local `Payment` had already reached `completed` (i.e. it had actually granted access), reconciliation **revokes** that access: the `Subscription` tied to that PaymentIntent is marked `canceled` and the user is downgraded to `planTier: null` / `role: 'student'`. If the payment was still `pending`/`failed` (nothing was ever granted), this is just a status correction — no entitlement change.
+
+`requires_payment_method`/`requires_action` only normalize `Payment.status` to `pending`; they never touch entitlements either way. Every repair is written through the same `markPaymentCompleted`/`recordPaymentEvent` functions the webhook handlers use, and every candidate examined in `--apply` mode writes a `PaymentEvent` (`reconcile.checked`, `reconcile.mismatch`, `reconcile.repaired`, `reconcile.skipped`, or `reconcile.error`) so the run is fully auditable after the fact.
+
+### Reading the summary
+
+```json
+{
+  "checked": 125,
+  "mismatched": 8,
+  "repaired": 6,
+  "skipped": 2,
+  "errors": 0
+}
+```
+
+- `checked` — total candidates examined.
+- `mismatched` — local status disagreed with Stripe's.
+- `repaired` — mismatches fixed (only in `--apply` mode; always `0` in dry-run).
+- `skipped` — a Stripe `PaymentIntent` was found with no matching local `Payment` row (nothing to repair — investigate manually).
+- `errors` — a candidate failed to process (Stripe API error, DB error, etc.). The run continues past individual errors, but the process exits non-zero (`errors > 0`) so this is safe to wire into CI/alerting.
+
+### Incident checklist ("webhooks stopped arriving at 2am")
+
+1. Confirm the incident window (deploy time, first failed webhook log line, secret rotation time).
+2. Run a dry-run over that window: `npm run payments:reconcile -- --since=24h --dry-run`. Read the table before touching anything.
+3. If the diffs look correct, re-run with `--apply` (add `RECONCILE_CONFIRM=YES` in production) and a `--limit` you're comfortable reviewing (start with `--limit=20` for a first pass on an unfamiliar incident).
+4. Re-run the same `--since` window with `--dry-run` afterward — `mismatched` should now be `0` (or explain the remainder).
+5. Fix the root cause of the webhook gap (redeploy the handler, update `STRIPE_WEBHOOK_SECRET` in the Stripe Dashboard, etc.) before closing the incident — this tool repairs data, it does not fix delivery.
+
+### Scheduling
+
+There is no cron runner bundled with this repo. To run this on a schedule, invoke `npm run payments:reconcile -- --since=1h --apply --limit=200` (with `RECONCILE_CONFIRM=YES` in production) from whatever scheduler already exists in your deployment — e.g. a platform cron job, GitHub Actions scheduled workflow, or a process manager timer — and alert on a non-zero exit code.
+
 ## 12) Further reading
 
 - API reference: [API_DOCUMENTATION.md](API_DOCUMENTATION.md)
