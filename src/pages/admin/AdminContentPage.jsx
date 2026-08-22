@@ -10,7 +10,7 @@ import { useKeyboardShortcuts, KeyboardShortcutsHelp } from '../../components/co
 
 export const AdminContentPage = () => {
   const navigate = useNavigate();
-  const { content, removeContent } = useContent();
+  const { content, error, openContent, removeContent } = useContent();
   const toast = useToast();
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -103,6 +103,8 @@ export const AdminContentPage = () => {
             </div>
           </div>
 
+          {error && <div className="error-message" role="alert">{error}</div>}
+
           {filteredContent.length === 0 ? (
             <div className="empty-state">
               <p>No hay contenido {filter !== 'all' ? `de tipo ${filter}` : ''}</p>
@@ -135,9 +137,9 @@ export const AdminContentPage = () => {
                       <td><StatusBadge status={item.type} type="content-type" /></td>
                       <td><StatusBadge status={item.status || 'published'} type="publish-status" /></td>
                       <td>{item.uploaded_by_name}</td>
-                      <td><StatusBadge status={item.plan_tier || (item.is_free ? 'free' : 'basico')} type="plan" /></td>
+                      <td><StatusBadge status={item.plan_tier || 'basico'} type="plan" /></td>
                       <td className="td-actions">
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
+                        <a href={item.url} onClick={(event) => { event.preventDefault(); openContent(item); }} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
                         <button
                           onClick={() => setDeleteTarget(item)}
                           className="button button-danger small"
