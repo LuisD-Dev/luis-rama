@@ -5,18 +5,21 @@ export const contentType = z.enum(['video', 'article', 'quiz'], {
   errorMap: () => ({ message: 'Type must be one of: video, article, quiz' }),
 });
 
-export const contentPlanTier = z.enum(
-  [
-    PLAN_TIERS.FREE,
-    PLAN_TIERS.BASICO,
-    PLAN_TIERS.PRO,
-    PLAN_TIERS.MASTER,
-  ],
-  {
-    errorMap: () => ({
-      message: 'Plan tier must be one of: free, basico, pro, master',
-    }),
-  }
+export const contentPlanTier = z.preprocess(
+  (value) => typeof value === 'string' ? value.trim() : value,
+  z.enum(
+    [
+      PLAN_TIERS.FREE,
+      PLAN_TIERS.BASICO,
+      PLAN_TIERS.PRO,
+      PLAN_TIERS.MASTER,
+    ],
+    {
+      errorMap: () => ({
+        message: 'Plan tier must be one of: free, basico, pro, master',
+      }),
+    }
+  )
 );
 
 const normalizeString = (label) =>

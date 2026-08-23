@@ -1,5 +1,9 @@
 import 'dotenv/config';
 
+process.env.LOCAL_UPLOADS = 'true';
+process.env.MEDIA_SIGNING_SECRET = process.env.MEDIA_SIGNING_SECRET || 'test-media-signing-secret';
+process.env.CONTENT_SIGNED_URL_TTL_SECONDS = process.env.CONTENT_SIGNED_URL_TTL_SECONDS || '900';
+
 if (process.env.TEST_DATABASE_URL) {
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 }

@@ -285,7 +285,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
   - `stripePaymentIntentId` is the attached Stripe identifier, or `null` when no identifier has been attached.
   - Normal responses use `pending`, `processing`, `succeeded`, `failed`, or `canceled`. The internal `created` state should not escape the committed creation flow.
-  - `pending` and `processing` mean the payment is not yet complete. Only `succeeded` is completed success; `failed` and `canceled` are terminal failure states.
+  - `pending` and `processing` mean the payment is not yet complete. Only `succeeded` is completed success. `canceled` is terminal; `failed` may return to `pending` only through explicit trusted admin/system reconciliation.
   - A synchronous Stripe response of `succeeded` may intentionally return local `processing`. The signed PaymentIntent webhook owns the atomic `processing` → `succeeded` transition and entitlement activation.
   - A client must evaluate the response status and must not treat HTTP 200 alone as completed payment.
   - The same idempotency key with the same user, plan, amount, currency, provider, and payment method may reuse the existing Payment. Reusing the key with any mismatched payment request returns `409` without exposing another user's Payment identifiers.
