@@ -216,7 +216,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
   - Description: Admin-only dashboard metrics with payment-based revenue and active subscriptions by tier.
   - Auth required: Yes
   - Role: admin only
-  - Revenue source: only `completed` payment records from `payments` table.
+  - Revenue source during status rollout: `succeeded`, plus legacy `completed` and `processed` Payment rows until operator migration is complete.
   - Response example:
 
 ```json
@@ -239,7 +239,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 **Payments routes** (`/api/payments`)
 
 - POST /api/payments/checkout
-  - Description: Create a Stripe Checkout Session for the authenticated user’s selected plan. Persists a pending `Payment` linked to the session and returns the hosted Checkout URL.
+  - Description: Create a Stripe Checkout Session for the authenticated user’s selected plan. A local `Payment` is committed as `pending` before the Stripe network request, then linked to the returned Checkout Session.
   - Auth required: Yes (Bearer token)
   - Body example:
 
@@ -264,16 +264,88 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
     - `400` — missing/invalid `plan`, or missing Stripe price / success/cancel URL configuration
     - `502` — Stripe API failure (safe client message; details logged server-side only)
 
+  - An authoritative Stripe rejection may transition the local Payment from `pending` to `failed`.
+  - An ambiguous network/transport failure does not automatically mark the Payment failed because Stripe may have created the remote object.
+  - `checkout.session.completed` advances the Payment through canonical transitions to `succeeded`. Entitlement effects run only for the execution that wins the `processing` → `succeeded` transition; duplicate or already-succeeded deliveries do not repeat them.
+
 - POST /api/payments/payment-method
   - Description: Existing Stripe Elements path. Confirms a PaymentIntent for a tokenized `paymentMethodId` (not hosted Checkout).
   - Auth required: Yes (Bearer token)
   - Body: `{ "paymentMethodId": "pm_...", "planTier": "basico", "idempotencyKey": "..." }` (idempotency key may also be sent as `Idempotency-Key` header)
+  - Response example (200):
+
+```json
+{
+  "paymentId": 123,
+  "stripePaymentIntentId": "pi_...",
+  "status": "pending",
+  "planTier": "pro"
+}
+```
+
+  - `stripePaymentIntentId` is the attached Stripe identifier, or `null` when no identifier has been attached.
+  - Normal responses use `pending`, `processing`, `succeeded`, `failed`, or `canceled`. The internal `created` state should not escape the committed creation flow.
+  - `pending` and `processing` mean the payment is not yet complete. Only `succeeded` is completed success. `canceled` is terminal; `failed` may return to `pending` only through explicit trusted admin/system reconciliation.
+  - A synchronous Stripe response of `succeeded` may intentionally return local `processing`. The signed PaymentIntent webhook owns the atomic `processing` → `succeeded` transition and entitlement activation.
+  - A client must evaluate the response status and must not treat HTTP 200 alone as completed payment.
+  - The same idempotency key with the same user, plan, amount, currency, provider, and payment method may reuse the existing Payment. Reusing the key with any mismatched payment request returns `409` without exposing another user's Payment identifiers.
+
+### Canonical Payment status model
+
+Canonical `Payment.status` values are exactly:
+
+`created`, `pending`, `processing`, `succeeded`, `failed`, `canceled`
+
+| From | Allowed to |
+|---|---|
+| `created` | `pending` |
+| `pending` | `processing`, `failed`, `canceled` |
+| `processing` | `succeeded`, `failed`, `canceled` |
+| `failed` | `pending` only through explicit trusted admin/system reconciliation |
+| `succeeded` | terminal |
+| `canceled` | terminal |
+
+Same-state observations are idempotent no-ops. Illegal transitions return a controlled conflict. `succeeded` and `canceled` cannot be resurrected, and `failed` cannot jump directly to `succeeded`. The `failed` → `pending` edge requires trusted reconciliation metadata and is not available to normal user/API retries.
+
+`completed` and `processed` are legacy persisted success values only; they are not canonical statuses. The runtime temporarily recognizes them in read-only compatibility checks until the outstanding data migration is rolled out. This documentation does not imply that existing rows have already been migrated.
+
+### Legacy status migration and operator fallback
+
+The Prisma schema source now defaults new `Payment.status` values to `created`. This source change does not alter the default of an already-existing database by itself.
+
+The standard migration path includes the data-only migration `Backend/prisma/migrations/20260821010000_canonical_payment_statuses/migration.sql`, which idempotently converts persisted `completed` and `processed` values to `succeeded`. Its presence does not imply that it has already run against production data.
+
+The shared Prisma migration history still contains a pre-existing duplicate Payment-table migration at `20260725120000_add_payments`. This change does not edit historical migration checksums, run `prisma migrate resolve`, or repair that broader migration chain. Because the chain may prevent standard migration execution in some environments, the explicit operator utility remains available as a safe fallback:
+
+```bash
+npm run payment-status:migrate:dry-run
+npm run payment-status:migrate
+```
+
+Run the fallback dry run first against the target database. The apply command converts only `completed` and `processed` to `succeeded`; unknown noncanonical values remain unchanged and cause a nonzero exit. The Prisma data migration and operator utility have distinct standard/fallback roles.
+
+### Exactly-once success effects
+
+Entitlement activation may occur only for the execution that actually wins the compare-and-set transition from `processing` to `succeeded`. Merely observing an already-succeeded Payment never reactivates entitlement. This rule covers duplicate webhook delivery, repeated admin confirmation, distinct success deliveries, and concurrent success processing.
+
+### PaymentIntent webhook delivery
+
+`POST /api/webhooks/stripe` processes one-time PaymentIntent events. After signature handling, a valid delivery is claimed by the unique `PaymentEvent.stripeEventId` boundary. The claim, Payment resolution, state transitions, winner-gated entitlement activation, and final event outcome are committed atomically.
+
+A PaymentIntent event resolves its local Payment in this order:
+
+1. `stripePaymentIntentId`
+2. Stripe `metadata.paymentId`
+
+The metadata fallback supports a webhook arriving after the local Payment commits but before the Stripe PaymentIntent id is attached locally. If both identifiers resolve to different Payments, processing fails and no entitlement is applied. If neither resolves, processing fails so Stripe can retry. Other webhook domain failures also return a retryable server failure instead of acknowledging a lost payment.
+
+A duplicate `stripeEventId` is an HTTP-successful no-op only after the original transaction has committed. If the original transaction rolls back, its event claim also rolls back and a later delivery can retry normally.
 
 ----
 
 **Payment persistence schema**
 
-All payment writes go through `Backend/services/paymentService.js` (`createPaymentIntent`, `markPaymentCompleted`, `recordPaymentEvent`). Controllers/routes must not write payment tables directly.
+All runtime `Payment.status` writes go through `Backend/services/paymentStateMachine.js`. Payment orchestration and non-status mutations remain in `Backend/services/paymentService.js`; controllers/routes must not write Payment status directly.
 
 ### `payments`
 
@@ -284,7 +356,7 @@ All payment writes go through `Backend/services/paymentService.js` (`createPayme
 | `plan_tier` | String | `basico` \| `pro` \| `master` |
 | `amount` | Int | Amount in cents |
 | `currency` | String | Default `usd` |
-| `status` | String | `pending` \| `completed` \| `failed` \| `canceled` |
+| `status` | String | Source default `created`. Canonical: `created` \| `pending` \| `processing` \| `succeeded` \| `failed` \| `canceled`; legacy persisted success values may still be `completed` or `processed` pending operator migration |
 | `provider` | String | Default `stripe` |
 | `external_id` | String? | Provider payment/session id |
 | `idempotency_key` | String UNIQUE | Prevents duplicate intents |
@@ -307,7 +379,7 @@ Indexes: unique `idempotency_key`; index `(user_id, created_at)`.
 | `external_id` | String | Unique with `provider` |
 | `current_period_start` / `current_period_end` | DateTime | |
 
-Created/activated inside `markPaymentCompleted` in the same transaction that sets payment `completed` and upgrades `users.plan_tier` / `role` to `premium`.
+Created/activated in the same transaction as successful Payment processing, and only when that execution wins the canonical `processing` → `succeeded` transition. Observing an already-succeeded Payment does not repeat entitlement activation.
 
 ### `payment_events`
 
@@ -319,10 +391,10 @@ Created/activated inside `markPaymentCompleted` in the same transaction that set
 | `payload` | String | JSON |
 | `processed_at` | DateTime? | |
 | `idempotency_key` | String UNIQUE | Dedupes event processing |
-| `stripe_event_id` | String? UNIQUE | Stripe webhook event id |
-| `outcome` | String? | `processing` \| `processed` \| `duplicate` \| `failed` \| `ignored` |
+| `stripe_event_id` | String? UNIQUE | Stripe delivery idempotency boundary |
+| `outcome` | String? | Processing result, for example `processing`, `processed`, `ignored`, or an idempotent/terminal observation |
 
-Migrations: forward `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`, reverse `.../down.sql` (also mirrored under `Backend/db/migrations/`).
+Payment audit migration: `Backend/prisma/migrations/20260720230001_payment_audit_trail/migration.sql`. Canonical status data migration: `Backend/prisma/migrations/20260821010000_canonical_payment_statuses/migration.sql`.
 ----
 
 Notes and mapping

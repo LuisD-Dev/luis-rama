@@ -1,7 +1,11 @@
 import express from 'express';
 import validate from '../middleware/validate.js';
 import * as paymentSchemas from '../schemas/payment.schema.js';
-import { createOrReusePayment } from '../services/paymentService.js';
+import {
+  createOrReusePayment,
+  PaymentServiceError,
+} from '../services/paymentService.js';
+import { PaymentTransitionError } from '../services/paymentStateMachine.js';
 import { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook } from '../controllers/paymentsController.js';
 import { verifyToken, adminOnly } from '../middleware/auth.js';
 
@@ -32,8 +36,29 @@ router.post(
         idempotencyKey: effectiveIdempotencyKey,
       });
 
-      res.json({ paymentId: payment.id, stripePaymentIntentId: payment.stripePaymentIntentId, status: payment.status });
+      res.json({
+        paymentId: payment.id,
+        stripePaymentIntentId: payment.stripePaymentIntentId,
+        status: payment.status,
+        planTier: payment.planTier,
+      });
     } catch (err) {
+      if (
+        err instanceof PaymentServiceError ||
+        err instanceof PaymentTransitionError
+      ) {
+        const statusCode =
+          Number.isInteger(err.statusCode) &&
+          err.statusCode >= 400 &&
+          err.statusCode <= 599
+            ? err.statusCode
+            : 500;
+        const body = {
+          error: err.clientMessage || err.message || 'Payment request failed',
+          ...(err.code ? { code: err.code } : {}),
+        };
+        return res.status(statusCode).json(body);
+      }
       next(err);
     }
   }

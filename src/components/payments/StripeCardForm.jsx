@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { CardElement, Elements, useElements, useStripe } from '@stripe/react-stripe-js';
 import { loadStripe } from '@stripe/stripe-js';
 import { paymentsService } from '../../services/api.js';
+import { submitAndApplyPaymentMethodResponse } from './paymentResult.js';
 
 const stripePublishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim();
 const PAYMENTS_ENABLED = import.meta.env.VITE_PAYMENTS_ENABLED === 'true';
@@ -85,10 +86,26 @@ function StripeCardFormContent({ submitLabel, successMessage, onSuccess }) {
       // Determine plan stored by CheckoutFlow
       const planTier = sessionStorage.getItem('checkout_plan');
 
-      await paymentsService.submitPaymentMethod(paymentMethod.id, { idempotencyKey, planTier });
-      card.clear();
-      setStatus({ type: 'success', message: successMessage });
-      onSuccess?.(paymentMethod.id);
+      const result = await submitAndApplyPaymentMethodResponse(
+        () => paymentsService.submitPaymentMethod(paymentMethod.id, {
+          idempotencyKey,
+          planTier,
+        }),
+        {
+          successMessage,
+          successValue: paymentMethod.id,
+          onStatus: setStatus,
+          onSuccess: (successfulPaymentMethodId, payment) => {
+            card.clear();
+            sessionStorage.removeItem('checkout_idempotency_key');
+            onSuccess?.(successfulPaymentMethodId, payment);
+          },
+        },
+      );
+
+      if (result.releaseIdempotencyKey && !result.completed) {
+        sessionStorage.removeItem('checkout_idempotency_key');
+      }
     } catch (error) {
       setStatus({ type: 'error', message: getStripeErrorMessage(error) });
     } finally {
@@ -108,7 +125,13 @@ function StripeCardFormContent({ submitLabel, successMessage, onSuccess }) {
       {status && (
         <div
           key={status.message}
-          className={status.type === 'success' ? 'success-message payment-status success' : 'error-message payment-status error animate-shake'}
+          className={
+            status.type === 'success'
+              ? 'success-message payment-status success'
+              : status.type === 'error'
+                ? 'error-message payment-status error animate-shake'
+                : 'payment-status'
+          }
           role={status.type === 'error' ? 'alert' : 'status'}
         >
           {status.message}

@@ -1,9 +1,12 @@
 import crypto from 'crypto';
-import prisma from '../utils/prismaClient.js';
 import {
+  confirmSimulatedPayment,
   createCheckoutSession,
+  createSimulatedPayment,
   constructStripeEvent,
   processStripeWebhookEvent,
+  PaymentConfirmationConflictError,
+  PaymentNotFoundError,
   PaymentServiceError,
 } from '../services/paymentService.js';
 
@@ -51,16 +54,10 @@ export const createPaymentIntent = async (req, res) => {
       return res.status(403).json({ error: 'admin_not_allowed' });
     }
 
-    const payment = await prisma.payment.create({
-      data: {
-        userId,
-        planTier: plan_tier,
-        amount: PLAN_AMOUNTS[plan_tier],
-        currency: 'usd',
-        status: 'pending',
-        provider: 'simulated',
-        idempotencyKey: `intent_${userId}_${plan_tier}_${crypto.randomUUID()}`,
-      },
+    const payment = await createSimulatedPayment({
+      userId,
+      planTier: plan_tier,
+      idempotencyKey: `intent_${userId}_${plan_tier}_${crypto.randomUUID()}`,
     });
 
     return res.status(201).json({
@@ -86,35 +83,9 @@ export const confirmPaymentIntent = async (req, res) => {
       return res.status(403).json({ error: 'forbidden' });
     }
 
-    const id = Number(req.params.id);
-    const payment = await prisma.payment.findUnique({ where: { id } });
-
-    if (!payment) {
-      return res.status(404).json({ error: 'payment_not_found' });
-    }
-
-    if (payment.status !== 'pending') {
-      return res.status(409).json({ error: 'payment_already_processed', currentStatus: payment.status });
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-      const updatedPayment = await tx.payment.update({
-        where: { id },
-        data: { status: 'completed' },
-      });
-
-      const currentUser = await tx.user.findUnique({ where: { id: payment.userId } });
-      if (!currentUser) throw new Error('user_not_found');
-
-      await tx.user.update({
-        where: { id: payment.userId },
-        data: {
-          planTier: payment.planTier,
-          role: currentUser.role === 'admin' ? 'admin' : 'premium',
-        },
-      });
-
-      return updatedPayment;
+    const result = await confirmSimulatedPayment({
+      paymentId: Number(req.params.id),
+      actorId: req.user.id,
     });
 
     return res.json({
@@ -124,6 +95,15 @@ export const confirmPaymentIntent = async (req, res) => {
       amount: result.amount,
     });
   } catch (err) {
+    if (err instanceof PaymentNotFoundError) {
+      return res.status(404).json({ error: 'payment_not_found' });
+    }
+    if (err instanceof PaymentConfirmationConflictError) {
+      return res.status(409).json({
+        error: 'payment_already_processed',
+        currentStatus: err.currentStatus,
+      });
+    }
     console.error(err);
     return res.status(500).json({ error: 'internal_error' });
   }

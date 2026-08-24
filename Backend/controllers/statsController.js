@@ -1,6 +1,11 @@
 import prisma from '../utils/prismaClient.js';
 
 const VISIT_KEY = 'page_visits';
+const SUCCESSFUL_PAYMENT_STATUSES = [
+  'succeeded',
+  'completed',
+  'processed',
+];
 
 const getMonthBounds = (date = new Date()) => {
   const start = new Date(date.getFullYear(), date.getMonth(), 1);
@@ -30,8 +35,8 @@ const calculateRevenueChange = (currentRevenue, previousRevenue) => {
 };
 
 const buildActiveSubscriptions = async () => {
-  const completedPayments = await prisma.payment.findMany({
-    where: { status: 'completed' },
+  const successfulPayments = await prisma.payment.findMany({
+    where: { status: { in: SUCCESSFUL_PAYMENT_STATUSES } },
     orderBy: [{ userId: 'asc' }, { createdAt: 'desc' }],
     select: {
       userId: true,
@@ -41,7 +46,7 @@ const buildActiveSubscriptions = async () => {
   });
 
   const latestPlanByUser = new Map();
-  for (const payment of completedPayments) {
+  for (const payment of successfulPayments) {
     if (!latestPlanByUser.has(payment.userId)) {
       latestPlanByUser.set(payment.userId, payment.planTier || null);
     }
@@ -105,14 +110,14 @@ export const getAdminStats = async (_req, res) => {
     const [revenueThisMonthAgg, revenueLastMonthAgg, activeSubscriptions] = await Promise.all([
       prisma.payment.aggregate({
         where: {
-          status: 'completed',
+          status: { in: SUCCESSFUL_PAYMENT_STATUSES },
           ...buildRangeFilter(thisMonth.start, thisMonth.end),
         },
         _sum: { amount: true },
       }),
       prisma.payment.aggregate({
         where: {
-          status: 'completed',
+          status: { in: SUCCESSFUL_PAYMENT_STATUSES },
           ...buildRangeFilter(lastMonth.start, lastMonth.end),
         },
         _sum: { amount: true },

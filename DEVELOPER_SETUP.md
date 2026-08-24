@@ -181,7 +181,7 @@ node ./scripts/purge_non_admins.js
 
 ## 11.1) Payment Reconciliation Runbook
 
-Stripe webhooks are the primary way `Payment` rows move from `pending` to `completed`. Webhooks can be lost — a deploy restarts the server mid-delivery, the handler 500s, `STRIPE_WEBHOOK_SECRET` gets rotated without updating the Dashboard, or Stripe simply can't reach the endpoint for a while. When that happens, Stripe's own record of a `PaymentIntent` is the source of truth and the local `Payment` row silently drifts out of sync. `npm run payments:reconcile` (`Backend/scripts/reconcilePayments.js`, backed by `Backend/services/paymentReconcileService.js`) detects and repairs that drift.
+Stripe webhooks are the primary way `Payment` rows move from `pending` through `processing` to canonical `succeeded`. Webhooks can be lost — a deploy restarts the server mid-delivery, the handler 500s, `STRIPE_WEBHOOK_SECRET` gets rotated without updating the Dashboard, or Stripe simply can't reach the endpoint for a while. When that happens, Stripe's own record of a `PaymentIntent` is the source of truth and the local `Payment` row silently drifts out of sync. `npm run payments:reconcile` (`Backend/scripts/reconcilePayments.js`, backed by `Backend/services/paymentReconcileService.js`) detects and repairs that drift.
 
 It complements, not replaces, the webhook handlers in [routes/webhooks.js](Backend/routes/webhooks.js) and [controllers/paymentsController.js](Backend/controllers/paymentsController.js) — run it after an incident, not instead of fixing webhook delivery.
 
@@ -224,12 +224,13 @@ Requires `STRIPE_SECRET_KEY`. If `NODE_ENV=production`, it additionally refuses 
 RECONCILE_CONFIRM=YES npm run payments:reconcile -- --since=24h --apply --limit=200
 ```
 
-Only four Stripe `PaymentIntent` statuses are ever acted on (`succeeded`, `canceled`, `requires_payment_method`, `requires_action` — see the mapping table in `paymentReconcileService.js`). Anything else is left untouched: the tool never guesses at an in-flight payment. Entitlements only move on the two conclusive ends of that mapping:
+Only four Stripe `PaymentIntent` statuses are ever acted on (`succeeded`, `canceled`, `requires_payment_method`, `requires_action` — see the mapping table in `paymentReconcileService.js`). Anything else is left untouched: the tool never guesses at an in-flight payment.
 
-- `succeeded` — grants/ensures `planTier` and premium access (via `markPaymentCompleted`, the same function the webhook handler uses).
-- `canceled` — if the local `Payment` had already reached `completed` (i.e. it had actually granted access), reconciliation **revokes** that access: the `Subscription` tied to that PaymentIntent is marked `canceled` and the user is downgraded to `planTier: null` / `role: 'student'`. If the payment was still `pending`/`failed` (nothing was ever granted), this is just a status correction — no entitlement change.
+- `succeeded` — converges through legal state-machine edges to canonical `succeeded` and grants `planTier`/premium access only when this execution wins the transition into `succeeded` (via `markPaymentCompleted`, the same completion logic the webhook handler uses).
+- `canceled` — converges a non-terminal local payment to canonical `canceled` without changing entitlements.
+- `requires_payment_method` / `requires_action` — converge a non-terminal local payment to `pending` without changing entitlements. For example, `processing -> pending` is performed as `processing -> failed -> pending`, with the second edge carrying trusted reconciliation metadata.
 
-`requires_payment_method`/`requires_action` only normalize `Payment.status` to `pending`; they never touch entitlements either way. Every repair is written through the same `markPaymentCompleted`/`recordPaymentEvent` functions the webhook handlers use, and every candidate examined in `--apply` mode writes a `PaymentEvent` (`reconcile.checked`, `reconcile.mismatch`, `reconcile.repaired`, `reconcile.skipped`, or `reconcile.error`) so the run is fully auditable after the fact.
+`succeeded` and `canceled` are terminal local states. If Stripe contradicts an already-terminal local state, reconciliation records a controlled `reconcile.error`; it does not rewrite the status, grant access, or revoke access. All status changes go through `paymentStateMachine.js`, and every candidate examined in `--apply` mode writes a `PaymentEvent` (`reconcile.checked`, `reconcile.mismatch`, `reconcile.repaired`, `reconcile.skipped`, or `reconcile.error`) so the run is fully auditable after the fact.
 
 ### Reading the summary
 

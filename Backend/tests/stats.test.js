@@ -32,68 +32,63 @@ describe('Stats endpoints', () => {
     expect(r2.body).toHaveProperty('studentCount');
   });
 
-  it('GET /api/admin/stats should aggregate revenue from completed payments only', async () => {
+  it('GET /api/admin/stats counts canonical and legacy success statuses only', async () => {
     await request(app).post('/api/auth/signup').send({ name: adminUser.name, email: adminUser.email, password: adminUser.password });
     await promoteUserToAdmin(adminUser.email);
     const loginAdmin = await request(app).post('/api/auth/login').send({ email: adminUser.email, password: adminUser.password });
     const adminToken = loginAdmin.body.token;
 
-    await request(app).post('/api/auth/signup').send({ name: 'Student One', email: 'student.one@example.com', password: 'Student*123' });
-    await request(app).post('/api/auth/signup').send({ name: 'Student Two', email: 'student.two@example.com', password: 'Student*123' });
-    await request(app).post('/api/auth/signup').send({ name: 'Student Three', email: 'student.three@example.com', password: 'Student*123' });
-
-    const [studentOne, studentTwo, studentThree] = await Promise.all([
-      prisma.user.findUnique({ where: { email: 'student.one@example.com' } }),
-      prisma.user.findUnique({ where: { email: 'student.two@example.com' } }),
-      prisma.user.findUnique({ where: { email: 'student.three@example.com' } }),
-    ]);
+    const users = await Promise.all(
+      [
+        'succeeded',
+        'completed',
+        'processed',
+        'pending',
+        'processing',
+        'failed',
+        'canceled',
+      ].map((status) =>
+        prisma.user.create({
+          data: {
+            name: `${status} Student`,
+            email: `${status}.stats@example.com`,
+            passwordHash: 'hashed-password',
+          },
+        })
+      )
+    );
+    const userByStatus = Object.fromEntries(
+      users.map((user) => [user.name.split(' ')[0], user])
+    );
 
     const now = new Date();
     const firstDayCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 5, 12, 0, 0);
     const firstDayLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 5, 12, 0, 0);
 
-    await Promise.all([
-      prisma.payment.create({
-        data: {
-          userId: studentOne.id,
-          amount: 120,
-          status: 'completed',
-          planTier: 'basico',
-          idempotencyKey: 'stats-current-basico',
-          createdAt: firstDayCurrentMonth,
-        },
-      }),
-      prisma.payment.create({
-        data: {
-          userId: studentTwo.id,
-          amount: 60,
-          status: 'completed',
-          planTier: 'pro',
-          idempotencyKey: 'stats-current-pro',
-          createdAt: firstDayCurrentMonth,
-        },
-      }),
-      prisma.payment.create({
-        data: {
-          userId: studentThree.id,
-          amount: 40,
-          status: 'completed',
-          planTier: 'master',
-          idempotencyKey: 'stats-previous-master',
-          createdAt: firstDayLastMonth,
-        },
-      }),
-      prisma.payment.create({
-        data: {
-          userId: studentTwo.id,
-          amount: 200,
-          status: 'pending',
-          planTier: 'master',
-          idempotencyKey: 'stats-pending-master',
-          createdAt: firstDayCurrentMonth,
-        },
-      }),
-    ]);
+    const fixtures = [
+      { status: 'succeeded', amount: 120, planTier: 'basico', createdAt: firstDayCurrentMonth },
+      { status: 'completed', amount: 60, planTier: 'pro', createdAt: firstDayCurrentMonth },
+      { status: 'processed', amount: 40, planTier: 'master', createdAt: firstDayLastMonth },
+      { status: 'pending', amount: 200, planTier: 'basico', createdAt: firstDayCurrentMonth },
+      { status: 'processing', amount: 300, planTier: 'pro', createdAt: firstDayCurrentMonth },
+      { status: 'failed', amount: 400, planTier: 'master', createdAt: firstDayCurrentMonth },
+      { status: 'canceled', amount: 500, planTier: 'master', createdAt: firstDayCurrentMonth },
+    ];
+
+    await Promise.all(
+      fixtures.map((fixture) =>
+        prisma.payment.create({
+          data: {
+            userId: userByStatus[fixture.status].id,
+            amount: fixture.amount,
+            status: fixture.status,
+            planTier: fixture.planTier,
+            idempotencyKey: `stats-${fixture.status}`,
+            createdAt: fixture.createdAt,
+          },
+        })
+      )
+    );
 
     const res = await request(app)
       .get('/api/admin/stats')

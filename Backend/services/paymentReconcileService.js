@@ -1,46 +1,50 @@
 import crypto from 'crypto';
 import prisma from '../utils/prismaClient.js';
 import stripeClient from './stripeClient.js';
-import { recordPaymentEvent, markPaymentCompleted, PaymentNotFoundError } from './paymentService.js';
+import {
+  recordPaymentEvent,
+  markPaymentCompleted,
+  PaymentNotFoundError,
+} from './paymentService.js';
+import {
+  PAYMENT_STATUSES,
+  PaymentTransitionError,
+  applyTransition,
+} from './paymentStateMachine.js';
 
 /**
- * Stripe PaymentIntent.status -> local Payment.status mapping. Only these four
- * Stripe statuses are conclusive enough to act on; anything else (processing,
- * requires_capture, requires_confirmation, ...) is left untouched so the tool
- * never guesses at an in-flight payment. Entitlements only move on the two
- * conclusive ends of the mapping — "succeeded" grants, "canceled" revokes
- * whatever this specific PaymentIntent had granted; requires_payment_method
- * and requires_action are pure status corrections that never touch a plan.
- *
- * (Local status is spelled "completed" here, not the literal Stripe word
- * "succeeded", to match the vocabulary the rest of this codebase already uses
- * for Payment.status — see markPaymentCompleted/statsController, which key
- * revenue reporting off status "completed". Using "succeeded" as a distinct
- * value would silently split payments across two words for the same state.)
- *
- * Stripe status              -> Local Payment.status
- * succeeded                  -> completed (+ ensure planTier/subscription via markPaymentCompleted)
- * canceled                   -> canceled (+ revoke the entitlement this PaymentIntent granted,
- *                                if the local Payment had actually reached "completed" before —
- *                                do not keep paid access sourced from a PaymentIntent Stripe
- *                                now says was canceled)
- * requires_payment_method    -> pending
- * requires_action            -> pending
+ * Only Stripe statuses with an actionable canonical local meaning are mapped.
+ * In-flight Stripe statuses remain observations and never cause a guessed
+ * local transition.
  */
 export const STRIPE_STATUS_MAP = Object.freeze({
-  succeeded: 'completed',
-  canceled: 'canceled',
-  requires_payment_method: 'pending',
-  requires_action: 'pending',
+  succeeded: PAYMENT_STATUSES.SUCCEEDED,
+  canceled: PAYMENT_STATUSES.CANCELED,
+  requires_payment_method: PAYMENT_STATUSES.PENDING,
+  requires_action: PAYMENT_STATUSES.PENDING,
 });
 
-const DB_CANDIDATE_STATUSES = ['pending', 'processing', 'failed'];
+const DB_CANDIDATE_STATUSES = [
+  PAYMENT_STATUSES.CREATED,
+  PAYMENT_STATUSES.PENDING,
+  PAYMENT_STATUSES.PROCESSING,
+  PAYMENT_STATUSES.FAILED,
+];
+const LEGACY_SUCCESS_PAYMENT_STATUSES = new Set(['completed', 'processed']);
 const DEFAULT_LIMIT = 50;
+const MAX_CONVERGENCE_STEPS = 5;
+
+const SYSTEM_RECONCILE_META = Object.freeze({
+  retryKind: 'reconcile',
+  source: 'system_reconcile',
+  actorType: 'system',
+  reason: 'Stripe PaymentIntent reconciliation',
+});
 
 const SINCE_PATTERN = /^(\d+)(h|d|m)$/i;
 const SINCE_UNIT_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 };
 
-/** Parse "24h" / "7d" / "30m" into a Date cutoff. Pure — no I/O. */
+/** Parse "24h" / "7d" / "30m" into a Date cutoff. Pure; no I/O. */
 export function parseSince(value) {
   if (value == null) return null;
   const match = SINCE_PATTERN.exec(String(value).trim());
@@ -52,20 +56,27 @@ export function parseSince(value) {
   return new Date(Date.now() - amount * unitMs);
 }
 
-/** Pure: Stripe status -> local status, or null when the state is inconclusive. */
+/** Pure: Stripe status -> canonical local status, or null when inconclusive. */
 export function mapStripeStatusToLocal(stripeStatus) {
   return STRIPE_STATUS_MAP[stripeStatus] ?? null;
 }
 
 /**
- * Pure: compare a local Payment row against the live Stripe PaymentIntent and
- * describe the divergence, if any. Never touches the database or Stripe.
+ * Pure: compare a local Payment row against the live Stripe PaymentIntent.
+ * Legacy successful rows are rollout-compatible with canonical succeeded,
+ * but reconciliation never writes either legacy value.
  */
 export function buildDiff({ payment, stripePaymentIntent }) {
   const stripeStatus = stripePaymentIntent.status;
   const mappedLocalStatus = mapStripeStatusToLocal(stripeStatus);
   const localStatus = payment.status;
-  const mismatch = mappedLocalStatus !== null && mappedLocalStatus !== localStatus;
+  const legacySuccessMatch =
+    mappedLocalStatus === PAYMENT_STATUSES.SUCCEEDED &&
+    LEGACY_SUCCESS_PAYMENT_STATUSES.has(localStatus);
+  const mismatch =
+    mappedLocalStatus !== null &&
+    mappedLocalStatus !== localStatus &&
+    !legacySuccessMatch;
 
   return {
     paymentId: payment.id,
@@ -77,7 +88,7 @@ export function buildDiff({ payment, stripePaymentIntent }) {
   };
 }
 
-/** Pure: fold a list of per-candidate results into the CLI summary shape. */
+/** Pure: fold per-candidate results into the CLI summary shape. */
 export function summarize(results) {
   const summary = { checked: 0, mismatched: 0, repaired: 0, skipped: 0, errors: 0 };
   for (const result of results) {
@@ -90,7 +101,79 @@ export function summarize(results) {
   return summary;
 }
 
-/** Caso B: local rows stuck in a non-terminal status that still point at Stripe. */
+/**
+ * Return the legal canonical edges needed to reach a Stripe reconciliation
+ * target. This planner deliberately has no terminal-state escape hatch.
+ */
+export function planReconciliationTransitions(from, target) {
+  if (from === target) return [];
+  if (
+    target === PAYMENT_STATUSES.SUCCEEDED &&
+    LEGACY_SUCCESS_PAYMENT_STATUSES.has(from)
+  ) {
+    return [];
+  }
+
+  if (from === PAYMENT_STATUSES.SUCCEEDED || from === PAYMENT_STATUSES.CANCELED) {
+    throw new PaymentTransitionError(from, target, {
+      currentStatus: from,
+      detail: 'terminal payment state conflicts with Stripe reconciliation target',
+    });
+  }
+
+  const paths = {
+    [PAYMENT_STATUSES.CREATED]: {
+      [PAYMENT_STATUSES.PENDING]: [PAYMENT_STATUSES.PENDING],
+      [PAYMENT_STATUSES.SUCCEEDED]: [
+        PAYMENT_STATUSES.PENDING,
+        PAYMENT_STATUSES.PROCESSING,
+        PAYMENT_STATUSES.SUCCEEDED,
+      ],
+      [PAYMENT_STATUSES.CANCELED]: [
+        PAYMENT_STATUSES.PENDING,
+        PAYMENT_STATUSES.CANCELED,
+      ],
+    },
+    [PAYMENT_STATUSES.PENDING]: {
+      [PAYMENT_STATUSES.SUCCEEDED]: [
+        PAYMENT_STATUSES.PROCESSING,
+        PAYMENT_STATUSES.SUCCEEDED,
+      ],
+      [PAYMENT_STATUSES.CANCELED]: [PAYMENT_STATUSES.CANCELED],
+    },
+    [PAYMENT_STATUSES.PROCESSING]: {
+      [PAYMENT_STATUSES.PENDING]: [
+        PAYMENT_STATUSES.FAILED,
+        PAYMENT_STATUSES.PENDING,
+      ],
+      [PAYMENT_STATUSES.SUCCEEDED]: [PAYMENT_STATUSES.SUCCEEDED],
+      [PAYMENT_STATUSES.CANCELED]: [PAYMENT_STATUSES.CANCELED],
+    },
+    [PAYMENT_STATUSES.FAILED]: {
+      [PAYMENT_STATUSES.PENDING]: [PAYMENT_STATUSES.PENDING],
+      [PAYMENT_STATUSES.SUCCEEDED]: [
+        PAYMENT_STATUSES.PENDING,
+        PAYMENT_STATUSES.PROCESSING,
+        PAYMENT_STATUSES.SUCCEEDED,
+      ],
+      [PAYMENT_STATUSES.CANCELED]: [
+        PAYMENT_STATUSES.PENDING,
+        PAYMENT_STATUSES.CANCELED,
+      ],
+    },
+  };
+
+  const path = paths[from]?.[target];
+  if (!path) {
+    throw new PaymentTransitionError(from, target, {
+      currentStatus: from,
+      detail: 'no legal reconciliation path exists',
+    });
+  }
+  return [...path];
+}
+
+/** Local rows that may still need Stripe truth applied. */
 export async function getDbCandidates({ since = null, limit = DEFAULT_LIMIT } = {}) {
   return prisma.payment.findMany({
     where: {
@@ -103,124 +186,152 @@ export async function getDbCandidates({ since = null, limit = DEFAULT_LIMIT } = 
   });
 }
 
-/** Single-payment lookup for --payment-id. Any status is eligible (admin-forced check). */
+/** Single-payment lookup for --payment-id. Any status is eligible. */
 export async function getCandidateByPaymentId(paymentId) {
   const payment = await prisma.payment.findUnique({ where: { id: Number(paymentId) } });
-  if (!payment) {
-    throw new PaymentNotFoundError();
-  }
+  if (!payment) throw new PaymentNotFoundError();
   if (!payment.stripePaymentIntentId) {
-    throw new Error(`Payment ${paymentId} has no stripePaymentIntentId; nothing to reconcile against Stripe.`);
+    throw new Error(
+      `Payment ${paymentId} has no stripePaymentIntentId; nothing to reconcile against Stripe.`
+    );
   }
   return payment;
 }
 
 /**
- * Caso A: ask Stripe directly for PaymentIntents created in the window, then
- * pair each with its local row (if any). A PaymentIntent with no local Payment
- * is returned with `payment: null` — reconciliation only ever corrects rows we
- * already know about, it never fabricates a new Payment.
+ * Ask Stripe for PaymentIntents in the window and pair them with local rows.
+ * Orphan PaymentIntents are reported but never used to fabricate a Payment.
  */
-export async function getStripeListCandidates({ since, limit }, { excludePaymentIds = new Set() } = {}) {
+export async function getStripeListCandidates(
+  { since, limit },
+  { excludePaymentIds = new Set() } = {}
+) {
   const intents = await stripeClient.listPaymentIntents({ since, limit });
   if (intents.length === 0) return [];
 
   const payments = await prisma.payment.findMany({
     where: { stripePaymentIntentId: { in: intents.map((pi) => pi.id) } },
   });
-  const byStripeId = new Map(payments.map((p) => [p.stripePaymentIntentId, p]));
+  const byStripeId = new Map(
+    payments.map((payment) => [payment.stripePaymentIntentId, payment])
+  );
 
   return intents
-    .map((pi) => ({ payment: byStripeId.get(pi.id) || null, stripePaymentIntent: pi }))
-    .filter((candidate) => !(candidate.payment && excludePaymentIds.has(candidate.payment.id)));
+    .map((stripePaymentIntent) => ({
+      payment: byStripeId.get(stripePaymentIntent.id) || null,
+      stripePaymentIntent,
+    }))
+    .filter(
+      (candidate) =>
+        !(candidate.payment && excludePaymentIds.has(candidate.payment.id))
+    );
 }
 
-/** Merge Caso B (primary) and Caso A (fills remaining budget), capped at `limit`. */
+/** Merge DB and Stripe candidates, capped at limit. */
 export async function getCandidates({ since, limit = DEFAULT_LIMIT }) {
   const dbPayments = await getDbCandidates({ since, limit });
-  const dbCandidates = dbPayments.map((payment) => ({ payment, stripePaymentIntent: null }));
+  const dbCandidates = dbPayments.map((payment) => ({
+    payment,
+    stripePaymentIntent: null,
+  }));
 
   const remaining = limit - dbCandidates.length;
   let stripeCandidates = [];
   if (remaining > 0) {
-    const excludePaymentIds = new Set(dbPayments.map((p) => p.id));
-    stripeCandidates = await getStripeListCandidates({ since, limit: remaining }, { excludePaymentIds });
+    const excludePaymentIds = new Set(dbPayments.map((payment) => payment.id));
+    stripeCandidates = await getStripeListCandidates(
+      { since, limit: remaining },
+      { excludePaymentIds }
+    );
   }
 
   return [...dbCandidates, ...stripeCandidates].slice(0, limit);
 }
 
 /**
- * Revoke the entitlement this Payment previously granted. Mirrors the same
- * simplifying assumption paymentService.js's customer.subscription.deleted
- * handler already relies on elsewhere in this codebase: this app models one
- * active plan per user (a single User.planTier/role pair), so losing the
- * subscription tied to this PaymentIntent downgrades the user unconditionally
- * — it does not attempt to check for some other, unrelated active plan.
+ * Converge a non-success target inside one transaction. Each edge is applied
+ * by the state machine. CAS losers re-plan from the freshly observed status.
  */
-async function revokeEntitlementForCanceledPayment(tx, payment) {
-  const subscription = payment.stripePaymentIntentId
-    ? await tx.subscription.findUnique({
-        where: { provider_externalId: { provider: payment.provider, externalId: payment.stripePaymentIntentId } },
-      })
-    : null;
+async function convergePaymentStatus(tx, paymentId, target) {
+  let payment = await tx.payment.findUnique({ where: { id: paymentId } });
+  if (!payment) throw new PaymentNotFoundError();
 
-  if (subscription && subscription.status !== 'canceled') {
-    await tx.subscription.update({ where: { id: subscription.id }, data: { status: 'canceled' } });
+  for (let step = 0; step < MAX_CONVERGENCE_STEPS; step += 1) {
+    const path = planReconciliationTransitions(payment.status, target);
+    if (path.length === 0) return payment;
+
+    const transition = await applyTransition(
+      tx,
+      payment.id,
+      path[0],
+      SYSTEM_RECONCILE_META
+    );
+    payment = transition.payment;
   }
 
-  await tx.user.update({
-    where: { id: payment.userId },
-    data: { planTier: null, role: 'student' },
+  throw new PaymentTransitionError(payment.status, target, {
+    paymentId,
+    currentStatus: payment.status,
+    detail: 'reconciliation did not converge after concurrent status changes',
   });
 }
 
-/**
- * Apply a repair for a mismatched (payment, diff) pair.
- * - "completed": delegates entirely to markPaymentCompleted (existing, tested
- *   logic) so plan activation, subscription upsert and entitlement flags stay
- *   in exactly one place.
- * - "canceled" / "pending": a Payment.status correction, wrapped in a
- *   transaction together with its audit PaymentEvent. Only revokes the user's
- *   entitlement when the payment had actually reached "completed" before.
- */
+/** Apply one known mismatch while preserving canonical state/entitlement rules. */
 async function applyRepair({ payment, diff, runId }) {
-  if (diff.mappedLocalStatus === 'completed') {
+  const target = diff.mappedLocalStatus;
+
+  if (target === PAYMENT_STATUSES.SUCCEEDED) {
+    let current = await prisma.payment.findUnique({ where: { id: payment.id } });
+    if (!current) throw new PaymentNotFoundError();
+
+    // markPaymentCompleted owns the winner-gated succeeded transition and
+    // entitlement transaction. Only failed needs trusted preparation first.
+    if (current.status === PAYMENT_STATUSES.FAILED) {
+      current = await prisma.$transaction((tx) =>
+        convergePaymentStatus(tx, payment.id, PAYMENT_STATUSES.PENDING)
+      );
+    }
+
+    // Validate terminal/concurrent state before invoking completion logic.
+    planReconciliationTransitions(current.status, PAYMENT_STATUSES.SUCCEEDED);
+
     await markPaymentCompleted({
       paymentId: payment.id,
-      subscriptionExternalId: diff.stripePaymentIntentId || payment.externalId,
-      eventPayload: { source: 'reconcile', runId, stripeStatus: diff.stripeStatus },
-      eventIdempotencyKey: `reconcile:${runId}:${payment.id}:completed`,
+      subscriptionExternalId:
+        diff.stripePaymentIntentId || payment.externalId,
+      eventPayload: {
+        source: 'reconcile',
+        runId,
+        stripeStatus: diff.stripeStatus,
+      },
+      eventIdempotencyKey: `reconcile:${runId}:${payment.id}:succeeded`,
     });
-    await recordPaymentEvent({
-      paymentId: payment.id,
-      type: 'reconcile.repaired',
-      payload: { runId, from: payment.status, to: diff.mappedLocalStatus, stripeStatus: diff.stripeStatus },
-      idempotencyKey: `reconcile:${runId}:${payment.id}:repaired`,
-      outcome: 'processed',
-    });
-    return;
-  }
 
-  // A completed payment whose PaymentIntent Stripe now reports canceled had
-  // actually granted access — repairing its status must also revoke that
-  // access, not just relabel the row.
-  const revokesEntitlement = diff.mappedLocalStatus === 'canceled' && payment.status === 'completed';
-
-  await prisma.$transaction(async (tx) => {
-    await tx.payment.update({ where: { id: payment.id }, data: { status: diff.mappedLocalStatus } });
-    if (revokesEntitlement) {
-      await revokeEntitlementForCanceledPayment(tx, payment);
-    }
     await recordPaymentEvent({
       paymentId: payment.id,
       type: 'reconcile.repaired',
       payload: {
         runId,
         from: payment.status,
-        to: diff.mappedLocalStatus,
+        to: PAYMENT_STATUSES.SUCCEEDED,
         stripeStatus: diff.stripeStatus,
-        entitlementRevoked: revokesEntitlement,
+      },
+      idempotencyKey: `reconcile:${runId}:${payment.id}:repaired`,
+      outcome: 'processed',
+    });
+    return;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const repairedPayment = await convergePaymentStatus(tx, payment.id, target);
+    await recordPaymentEvent({
+      paymentId: payment.id,
+      type: 'reconcile.repaired',
+      payload: {
+        runId,
+        from: payment.status,
+        to: repairedPayment.status,
+        stripeStatus: diff.stripeStatus,
       },
       idempotencyKey: `reconcile:${runId}:${payment.id}:repaired`,
       outcome: 'processed',
@@ -229,14 +340,11 @@ async function applyRepair({ payment, diff, runId }) {
   });
 }
 
-/**
- * Process one (payment, stripePaymentIntent) pair. In dry-run mode this is a
- * pure read: it computes the diff and returns it without writing anything, so
- * --dry-run can never modify the database. In apply mode it records an audit
- * trail for every candidate (reconcile.checked when nothing was wrong,
- * reconcile.mismatch + reconcile.repaired when a known-safe repair was made).
- */
-async function processCandidate({ payment, stripePaymentIntent }, { runId, apply }) {
+/** Process one local/Stripe pair, optionally applying the repair. */
+async function processCandidate(
+  { payment, stripePaymentIntent },
+  { runId, apply }
+) {
   const diff = buildDiff({ payment, stripePaymentIntent });
 
   if (!apply) {
@@ -247,7 +355,11 @@ async function processCandidate({ payment, stripePaymentIntent }, { runId, apply
     await recordPaymentEvent({
       paymentId: payment.id,
       type: 'reconcile.checked',
-      payload: { runId, stripeStatus: diff.stripeStatus, localStatus: diff.localStatus },
+      payload: {
+        runId,
+        stripeStatus: diff.stripeStatus,
+        localStatus: diff.localStatus,
+      },
       idempotencyKey: `reconcile:${runId}:${payment.id}:checked`,
       outcome: 'processed',
     });
@@ -265,15 +377,21 @@ async function processCandidate({ payment, stripePaymentIntent }, { runId, apply
   try {
     await applyRepair({ payment, diff, runId });
     return { ...diff, action: 'repaired' };
-  } catch (err) {
+  } catch (error) {
     await recordPaymentEvent({
       paymentId: payment.id,
       type: 'reconcile.error',
-      payload: { runId, message: err.message },
+      payload: {
+        runId,
+        message: error.message,
+        code: error.code || null,
+        currentStatus: error.currentStatus || null,
+        targetStatus: diff.mappedLocalStatus,
+      },
       idempotencyKey: `reconcile:${runId}:${payment.id}:error`,
       outcome: 'failed',
     }).catch(() => {});
-    return { ...diff, action: 'error', error: err.message };
+    return { ...diff, action: 'error', error: error.message };
   }
 }
 
@@ -288,13 +406,7 @@ const orphanResult = (stripePaymentIntent) => ({
   reason: 'no_local_payment',
 });
 
-/**
- * Entry point used by the CLI. Resolves candidates (either a single
- * --payment-id or the --since/--limit window), diffs each against Stripe, and
- * — only when apply=true — repairs known-safe mismatches with a full audit
- * trail. A per-candidate error never aborts the run; it is recorded and
- * reflected in summary.errors so the caller can set a non-zero exit code.
- */
+/** Entry point used by the reconciliation CLI. */
 export async function reconcilePayments({
   since = null,
   limit = DEFAULT_LIMIT,
@@ -303,7 +415,12 @@ export async function reconcilePayments({
   runId = crypto.randomUUID(),
 } = {}) {
   const candidates = paymentId
-    ? [{ payment: await getCandidateByPaymentId(paymentId), stripePaymentIntent: null }]
+    ? [
+        {
+          payment: await getCandidateByPaymentId(paymentId),
+          stripePaymentIntent: null,
+        },
+      ]
     : await getCandidates({ since, limit });
 
   const results = [];
@@ -331,14 +448,26 @@ export async function reconcilePayments({
 
     try {
       const stripePaymentIntent =
-        candidate.stripePaymentIntent || (await stripeClient.retrievePaymentIntent(candidate.payment.stripePaymentIntentId));
-      results.push(await processCandidate({ payment: candidate.payment, stripePaymentIntent }, { runId, apply }));
-    } catch (err) {
+        candidate.stripePaymentIntent ||
+        (await stripeClient.retrievePaymentIntent(
+          candidate.payment.stripePaymentIntentId
+        ));
+      results.push(
+        await processCandidate(
+          { payment: candidate.payment, stripePaymentIntent },
+          { runId, apply }
+        )
+      );
+    } catch (error) {
       if (apply) {
         await recordPaymentEvent({
           paymentId: candidate.payment.id,
           type: 'reconcile.error',
-          payload: { runId, message: err.message, stage: 'stripe_lookup' },
+          payload: {
+            runId,
+            message: error.message,
+            stage: 'stripe_lookup',
+          },
           idempotencyKey: `reconcile:${runId}:${candidate.payment.id}:error`,
           outcome: 'failed',
         }).catch(() => {});
@@ -351,7 +480,7 @@ export async function reconcilePayments({
         mappedLocalStatus: null,
         mismatch: false,
         action: 'error',
-        error: err.message,
+        error: error.message,
       });
     }
   }
@@ -365,6 +494,7 @@ export default {
   mapStripeStatusToLocal,
   buildDiff,
   summarize,
+  planReconciliationTransitions,
   getDbCandidates,
   getCandidateByPaymentId,
   getStripeListCandidates,
