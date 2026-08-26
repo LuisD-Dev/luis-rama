@@ -125,12 +125,19 @@ export const getAdminStats = async (req, res) => {
 
   const pendingRequests = 0; // Placeholder — implement when a requests model exists
 
-  // Revenue — placeholder, implement when payments are tracked
-  const revenueThisMonth = 0;
-  const revenueLastMonth = 0;
+  // During rollout, successful rows include succeeded, completed, and processed.
+  // Use `paidAt` when available, otherwise fallback to `createdAt`.
+  const revenueThisMonth = sumSuccessfulPaymentsForCurrentMonth();
+  const revenueLastMonth = sumSuccessfulPaymentsForPreviousMonth();
   const revenueChange = revenueLastMonth > 0
-    ? Math.round(((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100)
-    : 0;
+    ? Number((((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100).toFixed(2))
+    : (revenueThisMonth > 0 ? 100 : 0);
+
+  const activeSubscriptions = {
+    basico: countUsersWhoseLatestSuccessfulPaymentIs('basico'),
+    pro: countUsersWhoseLatestSuccessfulPaymentIs('pro'),
+    master: countUsersWhoseLatestSuccessfulPaymentIs('master'),
+  };
 
   res.json({
     totalStudents,
@@ -139,13 +146,21 @@ export const getAdminStats = async (req, res) => {
     activeCourses,
     newRegistrations,
     pendingRequests,
-    revenue: {
-      thisMonth: revenueThisMonth,
-      change: revenueChange,
-    },
+    revenueThisMonth,
+    revenueLastMonth,
+    revenueChange,
+    activeSubscriptions,
+    currency: 'USD',
   });
 };
 ```
+
+Implementation status in this repository:
+
+- `GET /api/admin/stats` is implemented in `controllers/statsController.js` and protected by `verifyToken` + `adminOnly`.
+- During rollout, revenue metrics count `succeeded` plus legacy `completed` and `processed` Payment rows.
+- Month-over-month comparison is based on current month vs previous month boundaries.
+- Active subscriptions are grouped by plan tier from each user's latest successful Payment across the same rollout-compatible status set.
 
 **Mount in `app.js` (or `server.js`):**
 ```javascript
@@ -172,6 +187,21 @@ router.get('/stats', verifyToken, adminOnly, getAdminStats);
 
 export default router;
 ```
+
+### 1.4 Payment completion status semantics
+
+The frontend must use the canonical `status` returned by `POST /api/payments/payment-method`; an HTTP 200 response alone is not proof of completed payment.
+
+| Payment status | Frontend behavior |
+|---|---|
+| `succeeded` | Show completed-payment UX |
+| `pending` | Show a neutral processing state; do not show completion |
+| `processing` | Show a neutral processing state; do not show completion |
+| `failed` | Show failure UI |
+| `canceled` | Show cancellation/failure UI |
+| unknown or missing | Fail closed; never show success |
+
+The current application has no payment polling/status retrieval endpoint. A screen that receives `pending` or `processing` therefore does not automatically advance to `succeeded` without another navigation or refresh mechanism.
 
 ---
 

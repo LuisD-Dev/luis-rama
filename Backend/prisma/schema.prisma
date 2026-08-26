@@ -17,7 +17,7 @@ model User {
   resetPin          String?   @map("reset_pin")
   resetPinExpiresAt DateTime? @map("reset_pin_expires_at")
   planTier          String?   @map("plan_tier")
-  riskWhitelisted   Boolean   @default(false) @map("risk_whitelisted")
+  stripeCustomerId  String?   @unique @map("stripe_customer_id")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
   payments          Payment[]
@@ -55,7 +55,7 @@ model Payment {
   amount                  Int
   currency                String    @default("usd")
   planTier                String    @map("plan_tier")
-  status                  String    @default("pending")
+  status                  String    @default("created")
   provider                String    @default("stripe")
   externalId              String?   @map("external_id")
   paymentMethodId         String?   @map("payment_method_id")
@@ -110,21 +110,15 @@ model PaymentEvent {
   @@map("payment_events")
 }
 
-model RiskDecision {
+model AuditLog {
   id          Int      @id @default(autoincrement())
-  userId      Int?     @map("user_id")
-  ipHash      String   @map("ip_hash")
-  path        String
-  signalsJson String   @map("signals_json")
-  score       Int
-  decision    String
-  mode        String
+  actor       String
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    Int?     @map("entity_id")
+  beforeState String?  @map("before_state")
+  afterState  String?  @map("after_state")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([userId, createdAt])
-  @@index([ipHash, createdAt])
-  @@index([decision, createdAt])
-  @@map("risk_decisions")
+  @@map("audit_logs")
 }

@@ -1,3 +1,5 @@
+import { getContentPlanTier } from './contentAccess.js';
+
 export const formatUser = (user) => ({
   id: user.id,
   email: user.email,
@@ -19,7 +21,7 @@ export const formatContent = (item) => ({
   type: item.type,
   url: item.url,
   is_free: item.isFree,
-  plan_tier: item.planTier || (item.isFree ? 'free' : 'basico'),
+  plan_tier: getContentPlanTier(item),
   uploaded_by: item.uploadedBy,
   created_at: item.createdAt,
   uploaded_by_name: item.uploader?.name ?? item.uploaded_by_name ?? null,

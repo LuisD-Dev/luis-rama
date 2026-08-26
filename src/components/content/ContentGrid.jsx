@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Icon, UIIcon } from '../common/Icons.jsx';
 import { planLabel } from '../../utils/plans.js';
+import { useContent } from '../../context/ContentContext.jsx';
 import { ContentCard } from './ContentCard.jsx';
 
 const FILTERS = [
@@ -24,6 +25,12 @@ const SkeletonCard = () => (
 
 export const ContentGrid = ({ content = [], onDelete, isAdmin = false, user = null, loading = false }) => {
   const [filter, setFilter] = useState('all');
+  const { error, openContent } = useContent();
+
+  const handleOpen = (event, item) => {
+    event.preventDefault();
+    openContent(item);
+  };
 
   const filteredContent = filter === 'all'
     ? content
@@ -36,21 +43,23 @@ export const ContentGrid = ({ content = [], onDelete, isAdmin = false, user = nu
       <div className="content-header">
         <h2>Contenido</h2>
         <div className="content-filters tc-filters">
-          {FILTERS.map((f) => (
+          {FILTERS.map((item) => (
             <button
-              key={f.value}
-              className={`filter-btn ${filter === f.value ? 'active' : ''}`}
-              onClick={() => setFilter(f.value)}
+              key={item.value}
+              className={`filter-btn ${filter === item.value ? 'active' : ''}`}
+              onClick={() => setFilter(item.value)}
             >
-              {f.label}
+              {item.label}
             </button>
           ))}
         </div>
       </div>
 
+      {error && <div className="error-message" role="alert">{error}</div>}
+
       {loading ? (
         <div className="tc-grid">
-          {[1, 2, 3, 4].map((i) => <SkeletonCard key={i} />)}
+          {[1, 2, 3, 4].map((item) => <SkeletonCard key={item} />)}
         </div>
       ) : filteredContent.length === 0 ? (
         <div className="empty-state">
@@ -84,9 +93,9 @@ export const ContentGrid = ({ content = [], onDelete, isAdmin = false, user = nu
                   </td>
                   <td><span className="badge small">{item.type.toUpperCase()}</span></td>
                   <td>{item.uploaded_by_name}</td>
-                  <td><span className="badge small">{planLabel(item.plan_tier || (item.is_free ? 'free' : 'basico'))}</span></td>
+                  <td><span className="badge small">{planLabel(item.plan_tier || 'basico')}</span></td>
                   <td className="td-actions">
-                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
+                    <a href={item.url} onClick={(event) => handleOpen(event, item)} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
                     <button onClick={() => onDelete(item.id)} className="button button-danger small">Eliminar</button>
                   </td>
                 </tr>
@@ -97,7 +106,7 @@ export const ContentGrid = ({ content = [], onDelete, isAdmin = false, user = nu
       ) : (
         <div className="tc-grid">
           {filteredContent.map((item) => (
-            <ContentCard key={item.id} item={item} user={user} />
+            <ContentCard key={item.id} item={item} user={user} onOpen={handleOpen} />
           ))}
         </div>
       )}

@@ -1,6 +1,14 @@
 import crypto from 'crypto';
-import prisma from '../utils/prismaClient.js';
-import { createCheckoutSession, PaymentServiceError } from '../services/paymentService.js';
+import {
+  confirmSimulatedPayment,
+  createCheckoutSession,
+  createSimulatedPayment,
+  constructStripeEvent,
+  processStripeWebhookEvent,
+  PaymentConfirmationConflictError,
+  PaymentNotFoundError,
+  PaymentServiceError,
+} from '../services/paymentService.js';
 
 const PLAN_AMOUNTS = { basico: 999, pro: 2499, master: 4999 };
 
@@ -47,18 +55,10 @@ export const createPaymentIntent = async (req, res) => {
       return res.status(403).json({ error: 'admin_not_allowed' });
     }
 
-    const ipHash = req._riskIpHash || null;
-    const payment = await prisma.payment.create({
-      data: {
-        userId,
-        planTier: plan_tier,
-        amount: PLAN_AMOUNTS[plan_tier],
-        currency: 'usd',
-        status: 'pending',
-        provider: 'simulated',
-        ipHash,
-        idempotencyKey: `intent_${userId}_${plan_tier}_${crypto.randomUUID()}`,
-      },
+    const payment = await createSimulatedPayment({
+      userId,
+      planTier: plan_tier,
+      idempotencyKey: `intent_${userId}_${plan_tier}_${crypto.randomUUID()}`,
     });
 
     return res.status(201).json({
@@ -84,35 +84,9 @@ export const confirmPaymentIntent = async (req, res) => {
       return res.status(403).json({ error: 'forbidden' });
     }
 
-    const id = Number(req.params.id);
-    const payment = await prisma.payment.findUnique({ where: { id } });
-
-    if (!payment) {
-      return res.status(404).json({ error: 'payment_not_found' });
-    }
-
-    if (payment.status !== 'pending') {
-      return res.status(409).json({ error: 'payment_already_processed', currentStatus: payment.status });
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-      const updatedPayment = await tx.payment.update({
-        where: { id },
-        data: { status: 'completed' },
-      });
-
-      const currentUser = await tx.user.findUnique({ where: { id: payment.userId } });
-      if (!currentUser) throw new Error('user_not_found');
-
-      await tx.user.update({
-        where: { id: payment.userId },
-        data: {
-          planTier: payment.planTier,
-          role: currentUser.role === 'admin' ? 'admin' : 'premium',
-        },
-      });
-
-      return updatedPayment;
+    const result = await confirmSimulatedPayment({
+      paymentId: Number(req.params.id),
+      actorId: req.user.id,
     });
 
     return res.json({
@@ -122,9 +96,52 @@ export const confirmPaymentIntent = async (req, res) => {
       amount: result.amount,
     });
   } catch (err) {
+    if (err instanceof PaymentNotFoundError) {
+      return res.status(404).json({ error: 'payment_not_found' });
+    }
+    if (err instanceof PaymentConfirmationConflictError) {
+      return res.status(409).json({
+        error: 'payment_already_processed',
+        currentStatus: err.currentStatus,
+      });
+    }
     console.error(err);
     return res.status(500).json({ error: 'internal_error' });
   }
 };
 
-export default { checkout, createPaymentIntent, confirmPaymentIntent };
+/**
+ * POST /api/payments/webhook — Stripe subscription lifecycle events.
+ * Verifies stripe-signature against the raw body, delegates state changes to
+ * paymentService, and maps the outcome to an HTTP status: 400 for a bad/missing
+ * signature, 200 once the event has been recorded (handled or ignored), 500 on
+ * internal failure so Stripe retries the delivery.
+ */
+export const stripeWebhook = async (req, res) => {
+  const signature = req.headers['stripe-signature'];
+
+  if (!signature) {
+    return res.status(400).json({ error: 'Missing stripe-signature header' });
+  }
+
+  let event;
+  try {
+    event = constructStripeEvent(req.body, signature);
+  } catch (err) {
+    console.warn({ err: err.message }, 'Stripe webhook signature verification failed');
+    return res.status(400).json({ error: 'Invalid signature' });
+  }
+
+  try {
+    const result = await processStripeWebhookEvent(event);
+    return res.status(200).json({ received: true, outcome: result.outcome });
+  } catch (err) {
+    console.error(
+      { stripeEventId: event?.id, eventType: event?.type, err: err.message },
+      'Stripe webhook processing failed'
+    );
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export default { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook };

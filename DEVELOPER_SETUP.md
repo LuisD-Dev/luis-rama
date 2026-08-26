@@ -53,11 +53,14 @@ cp ../.env.example .env
 # On Windows PowerShell: copy ../.env.example .env
 ```
 
-- Edit `Backend/.env` and set values for `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `JWT_SECRET`, `SENDGRID_API_KEY` (for emails), and `DATABASE_URL` (if using Postgres). See `.env.example` for descriptions for each variable.
+- Edit `Backend/.env` and set values for `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `JWT_SECRET`, `SENDGRID_API_KEY` (for emails), and `DATABASE_URL` (if using Postgres). When `LOCAL_UPLOADS=true`, also set a separate, long random `MEDIA_SIGNING_SECRET`. See `.env.example` for descriptions for each variable.
 
 Notes:
 - If you do not set `DATABASE_URL`, the backend will use a local SQLite file (default) created under `Backend/`.
 - The backend will fall back to a development `JWT_SECRET` if none is provided, but you should set `JWT_SECRET` for real development or production.
+- `CONTENT_SIGNED_URL_TTL_SECONDS` controls paid-content URL lifetime and defaults to 900 seconds. The backend constrains it to 300-900 seconds.
+- Do not reuse `JWT_SECRET` as `MEDIA_SIGNING_SECRET`; rotating one secret should not invalidate both authentication and media URLs.
+- Local storage keys may contain decoded spaces and Unicode characters, but must not contain a literal `%` followed by two hexadecimal characters. Local uploads already normalize filenames to UUID-based keys; custom/imported keys must apply the same policy so residual URL encoding cannot be mistaken for a real filename.
 
 ## 7) Running the project locally
 
@@ -138,6 +141,10 @@ If you prefer to use Supabase for storage and/or Postgres hosting:
 - Create a Supabase project and a storage bucket (default bucket name in this project: `uploads`).
 - Copy `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` into your `Backend/.env`.
 - Ensure `SUPABASE_SERVICE_KEY` is the service-role key (required for server-side uploads/deletes).
+- Configure paid-content objects in a **private** bucket. `createSignedUrl` limits access only when the underlying object is not also publicly readable. The service-role key stays on the backend and is used to create short-lived URLs after the plan check succeeds.
+- If free objects must remain permanently public, store them under a separately public storage policy/bucket; never make the bucket containing paid objects public.
+
+> **Security warning:** a signed URL does not protect an object that is also publicly readable. Never configure the bucket or storage policy containing paid content for public access.
 - If you want the backend DB to target Supabase Postgres, set `DATABASE_URL` to the Supabase Postgres connection string.
 
 ## 9) Database initialization, migrations and seed data
@@ -148,6 +155,8 @@ If you prefer to use Supabase for storage and/or Postgres hosting:
 - There is a `npm run migrate:postgres` script in `Backend/package.json` intended for migration helpers; inspect the script before running.
 
 ## 10) Common setup errors and fixes
+
+- "MEDIA_SIGNING_SECRET must be defined" — Set a long random server-side secret when `LOCAL_UPLOADS=true`. Rotating it invalidates previously issued local media URLs.
 
 - "SUPABASE_URL and SUPABASE_SERVICE_KEY must be defined" — Copy `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` into `Backend/.env` or remove Supabase-dependent calls if you are working purely with local uploads.
 - "No token provided" or 401 responses — Ensure `JWT_SECRET` is set in `Backend/.env` and that you include `Authorization: Bearer <token>` in requests that require authentication.
@@ -169,6 +178,89 @@ npm start
 ```bash
 node ./scripts/purge_non_admins.js
 ```
+
+## 11.1) Payment Reconciliation Runbook
+
+Stripe webhooks are the primary way `Payment` rows move from `pending` through `processing` to canonical `succeeded`. Webhooks can be lost — a deploy restarts the server mid-delivery, the handler 500s, `STRIPE_WEBHOOK_SECRET` gets rotated without updating the Dashboard, or Stripe simply can't reach the endpoint for a while. When that happens, Stripe's own record of a `PaymentIntent` is the source of truth and the local `Payment` row silently drifts out of sync. `npm run payments:reconcile` (`Backend/scripts/reconcilePayments.js`, backed by `Backend/services/paymentReconcileService.js`) detects and repairs that drift.
+
+It complements, not replaces, the webhook handlers in [routes/webhooks.js](Backend/routes/webhooks.js) and [controllers/paymentsController.js](Backend/controllers/paymentsController.js) — run it after an incident, not instead of fixing webhook delivery.
+
+### When to run it
+
+- After any incident where webhook delivery may have been interrupted (deploy, 500s in the logs for `/api/payments/webhook` or `/api/webhooks/stripe`, a rotated `STRIPE_WEBHOOK_SECRET`).
+- On a schedule as a safety net (see "Scheduling" below) — this tool has no built-in scheduler.
+- Ad hoc, when a user reports "I paid but I don't have access" — use `--payment-id`.
+
+### Flags
+
+| Flag | Description |
+| --- | --- |
+| `--since` | Time window to scan, e.g. `24h`, `7d`, `30m`. Required unless `--payment-id` is given. |
+| `--limit` | Maximum number of candidates to process (default 50). |
+| `--payment-id` | Reconcile a single `Payment` row by id, ignoring `--since`/`--limit`. |
+| `--dry-run` | Explicit no-op flag — dry-run is already the default. Never writes to the database. |
+| `--apply` | Actually repair the mismatches found. Without it, the command always behaves as `--dry-run`. |
+
+### Dry-run (safe, default)
+
+```bash
+cd Backend
+npm run payments:reconcile -- --since=24h --dry-run
+```
+
+Prints a table of every payment checked (local status vs. Stripe status) and a JSON summary. Makes zero writes — no `Payment` updates, no `PaymentEvent` rows.
+
+### Apply (repairs divergences)
+
+```bash
+cd Backend
+npm run payments:reconcile -- --since=7d --apply --limit=100
+npm run payments:reconcile -- --payment-id=123 --apply
+```
+
+Requires `STRIPE_SECRET_KEY`. If `NODE_ENV=production`, it additionally refuses to run unless `RECONCILE_CONFIRM=YES` is set for that invocation:
+
+```bash
+RECONCILE_CONFIRM=YES npm run payments:reconcile -- --since=24h --apply --limit=200
+```
+
+Only four Stripe `PaymentIntent` statuses are ever acted on (`succeeded`, `canceled`, `requires_payment_method`, `requires_action` — see the mapping table in `paymentReconcileService.js`). Anything else is left untouched: the tool never guesses at an in-flight payment.
+
+- `succeeded` — converges through legal state-machine edges to canonical `succeeded` and grants `planTier`/premium access only when this execution wins the transition into `succeeded` (via `markPaymentCompleted`, the same completion logic the webhook handler uses).
+- `canceled` — converges a non-terminal local payment to canonical `canceled` without changing entitlements.
+- `requires_payment_method` / `requires_action` — converge a non-terminal local payment to `pending` without changing entitlements. For example, `processing -> pending` is performed as `processing -> failed -> pending`, with the second edge carrying trusted reconciliation metadata.
+
+`succeeded` and `canceled` are terminal local states. If Stripe contradicts an already-terminal local state, reconciliation records a controlled `reconcile.error`; it does not rewrite the status, grant access, or revoke access. All status changes go through `paymentStateMachine.js`, and every candidate examined in `--apply` mode writes a `PaymentEvent` (`reconcile.checked`, `reconcile.mismatch`, `reconcile.repaired`, `reconcile.skipped`, or `reconcile.error`) so the run is fully auditable after the fact.
+
+### Reading the summary
+
+```json
+{
+  "checked": 125,
+  "mismatched": 8,
+  "repaired": 6,
+  "skipped": 2,
+  "errors": 0
+}
+```
+
+- `checked` — total candidates examined.
+- `mismatched` — local status disagreed with Stripe's.
+- `repaired` — mismatches fixed (only in `--apply` mode; always `0` in dry-run).
+- `skipped` — a Stripe `PaymentIntent` was found with no matching local `Payment` row (nothing to repair — investigate manually).
+- `errors` — a candidate failed to process (Stripe API error, DB error, etc.). The run continues past individual errors, but the process exits non-zero (`errors > 0`) so this is safe to wire into CI/alerting.
+
+### Incident checklist ("webhooks stopped arriving at 2am")
+
+1. Confirm the incident window (deploy time, first failed webhook log line, secret rotation time).
+2. Run a dry-run over that window: `npm run payments:reconcile -- --since=24h --dry-run`. Read the table before touching anything.
+3. If the diffs look correct, re-run with `--apply` (add `RECONCILE_CONFIRM=YES` in production) and a `--limit` you're comfortable reviewing (start with `--limit=20` for a first pass on an unfamiliar incident).
+4. Re-run the same `--since` window with `--dry-run` afterward — `mismatched` should now be `0` (or explain the remainder).
+5. Fix the root cause of the webhook gap (redeploy the handler, update `STRIPE_WEBHOOK_SECRET` in the Stripe Dashboard, etc.) before closing the incident — this tool repairs data, it does not fix delivery.
+
+### Scheduling
+
+There is no cron runner bundled with this repo. To run this on a schedule, invoke `npm run payments:reconcile -- --since=1h --apply --limit=200` (with `RECONCILE_CONFIRM=YES` in production) from whatever scheduler already exists in your deployment — e.g. a platform cron job, GitHub Actions scheduled workflow, or a process manager timer — and alert on a non-zero exit code.
 
 ## 12) Further reading
 

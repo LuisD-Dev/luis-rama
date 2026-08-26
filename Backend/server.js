@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import { connectDb } from './db/init.js';
 import app from './app.js';
-
 const PORT = process.env.PORT || 3001;
 
 if (!process.env.JWT_SECRET) {

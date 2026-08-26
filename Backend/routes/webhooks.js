@@ -1,12 +1,6 @@
 import express from 'express';
 import crypto from 'crypto';
-import {
-  markPaymentCompleted,
-  recordPaymentEvent,
-  updatePaymentEventOutcome,
-  findPaymentForStripeWebhook,
-  PaymentNotFoundError,
-} from '../services/paymentService.js';
+import { processPaymentIntentWebhookEvent } from '../services/paymentService.js';
 
 const router = express.Router();
 
@@ -54,105 +48,42 @@ router.post('/stripe', async (req, res) => {
     }
   }
 
+  let event;
   try {
     let parsed = rawBody;
     if (Buffer.isBuffer(rawBody)) parsed = rawBody.toString('utf8');
-    const event = typeof parsed === 'string' ? JSON.parse(parsed) : parsed;
-    const stripeEventId = event?.id;
-    const eventType = event?.type;
-    const paymentIntent = event.data?.object;
-    const idempotencyKey = paymentIntent?.metadata?.idempotencyKey;
-
-    if (!stripeEventId) {
-      console.warn('stripe webhook missing id');
-      return res.status(200).send('ok');
-    }
-
-    const { event: paymentEvent, created } = await recordPaymentEvent({
-      type: eventType || 'stripe.unknown',
-      payload: event,
-      idempotencyKey: `stripe:${stripeEventId}`,
-      stripeEventId,
-      outcome: 'processing',
-      processedAt: null,
-    });
-
-    if (!created) {
-      console.info(
-        {
-          stripeEventId,
-          eventType,
-          idempotencyKey,
-          outcome: 'duplicate',
-          timestamp: new Date().toISOString(),
-        },
-        'duplicate webhook delivery'
-      );
-      return res.status(200).send('duplicate');
-    }
-
-    if (eventType === 'payment_intent.succeeded') {
-      const stripeId = paymentIntent?.id;
-      const metadata = paymentIntent?.metadata || {};
-      const metaPaymentId =
-        parseInt(String(metadata?.paymentId || ''), 10) || null;
-
-      try {
-        const payment = await findPaymentForStripeWebhook({
-          stripePaymentIntentId: stripeId,
-          paymentId: metaPaymentId,
-          idempotencyKey,
-        });
-
-        if (!payment) {
-          await updatePaymentEventOutcome(paymentEvent.id, {
-            outcome: 'failed',
-          });
-          return res.status(200).send('ok');
-        }
-
-        const result = await markPaymentCompleted({
-          paymentId: payment.id,
-          subscriptionExternalId: stripeId || payment.externalId,
-          eventPayload: event,
-          eventIdempotencyKey: `payment.completed:${payment.id}:${stripeEventId}`,
-        });
-
-        await updatePaymentEventOutcome(paymentEvent.id, {
-          paymentId: payment.id,
-          outcome: result.alreadyCompleted ? 'duplicate' : 'processed',
-        });
-
-        console.info(
-          {
-            userId: payment.userId,
-            paymentId: payment.id,
-            stripeEventId,
-            eventType,
-            idempotencyKey,
-            outcome: result.alreadyCompleted ? 'duplicate' : 'processed',
-            timestamp: new Date().toISOString(),
-          },
-          'processed webhook event'
-        );
-      } catch (err) {
-        if (!(err instanceof PaymentNotFoundError)) {
-          console.error('Failed processing webhook:', err);
-        }
-        await updatePaymentEventOutcome(paymentEvent.id, {
-          outcome: 'failed',
-        });
-      }
-    } else {
-      await updatePaymentEventOutcome(paymentEvent.id, {
-        outcome: 'ignored',
-      });
-    }
-
-    res.status(200).send('ok');
+    event = typeof parsed === 'string' ? JSON.parse(parsed) : parsed;
   } catch (err) {
     console.error('Invalid webhook payload', err);
-    res.status(200).send('ok');
+    return res.status(200).send('ok');
+  }
+
+  if (!event?.id) {
+    console.warn('stripe webhook missing id');
+    return res.status(200).send('ok');
+  }
+
+  try {
+    const result = await processPaymentIntentWebhookEvent({ event });
+    console.info(
+      {
+        stripeEventId: event.id,
+        eventType: event.type,
+        paymentId: result.paymentId,
+        outcome: result.outcome,
+        timestamp: new Date().toISOString(),
+      },
+      result.outcome === 'duplicate'
+        ? 'duplicate webhook delivery'
+        : 'processed webhook event'
+    );
+
+    return res
+      .status(200)
+      .send(result.outcome === 'duplicate' ? 'duplicate' : 'ok');
+  } catch (err) {
+    console.error('Failed processing Stripe PaymentIntent webhook:', err);
+    return res.status(500).send('webhook processing failed');
   }
 });
 

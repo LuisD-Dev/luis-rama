@@ -18,7 +18,7 @@ const mapBodyToDescription = (req, _res, next) => {
 };
 
 router.get('/', optionalAuth, validate(contentSchemas.listContent, { target: 'query' }), getContent);
-router.get('/free', verifyToken, getFreeContent);
+router.get('/free', getFreeContent);
 router.get('/:id', optionalAuth, validate(contentSchemas.contentId, { target: 'params' }), getContentById);
 
 // Admin-only upload endpoint (supports file upload via 'file')

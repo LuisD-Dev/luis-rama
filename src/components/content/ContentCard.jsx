@@ -19,7 +19,7 @@ export const hasAccess = (item, user) => {
   return (TIER_ORDER[userTier] ?? -1) >= (TIER_ORDER[tier] ?? 99);
 };
 
-export const ContentCard = ({ item, user }) => {
+export const ContentCard = ({ item, user, onOpen }) => {
   const tier = resolveTier(item);
   const unlocked = hasAccess(item, user);
 
@@ -33,6 +33,7 @@ export const ContentCard = ({ item, user }) => {
         {unlocked && (
           <a
             href={item.url}
+            onClick={(event) => onOpen?.(event, item)}
             target="_blank"
             rel="noopener noreferrer"
             className="tc-overlay"
@@ -59,7 +60,7 @@ export const ContentCard = ({ item, user }) => {
         <p className="tc-author">Por: {item.uploaded_by_name || 'Teclia'}</p>
         {unlocked && (
           <div className="tc-actions">
-            <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">
+            <a href={item.url} onClick={(event) => onOpen?.(event, item)} target="_blank" rel="noopener noreferrer" className="button button-secondary small">
               Abrir recurso
             </a>
           </div>

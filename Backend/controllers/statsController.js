@@ -1,6 +1,69 @@
 import prisma from '../utils/prismaClient.js';
 
 const VISIT_KEY = 'page_visits';
+const SUCCESSFUL_PAYMENT_STATUSES = [
+  'succeeded',
+  'completed',
+  'processed',
+];
+
+const getMonthBounds = (date = new Date()) => {
+  const start = new Date(date.getFullYear(), date.getMonth(), 1);
+  const end = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+  return { start, end };
+};
+
+const getPreviousMonthBounds = (date = new Date()) => {
+  const start = new Date(date.getFullYear(), date.getMonth() - 1, 1);
+  const end = new Date(date.getFullYear(), date.getMonth(), 1);
+  return { start, end };
+};
+
+const buildRangeFilter = (start, end) => ({
+  createdAt: {
+    gte: start,
+    lt: end,
+  },
+});
+
+const calculateRevenueChange = (currentRevenue, previousRevenue) => {
+  if (previousRevenue === 0) {
+    return currentRevenue > 0 ? 100 : 0;
+  }
+
+  return Number((((currentRevenue - previousRevenue) / previousRevenue) * 100).toFixed(2));
+};
+
+const buildActiveSubscriptions = async () => {
+  const successfulPayments = await prisma.payment.findMany({
+    where: { status: { in: SUCCESSFUL_PAYMENT_STATUSES } },
+    orderBy: [{ userId: 'asc' }, { createdAt: 'desc' }],
+    select: {
+      userId: true,
+      planTier: true,
+      createdAt: true,
+    },
+  });
+
+  const latestPlanByUser = new Map();
+  for (const payment of successfulPayments) {
+    if (!latestPlanByUser.has(payment.userId)) {
+      latestPlanByUser.set(payment.userId, payment.planTier || null);
+    }
+  }
+
+  const counts = { basico: 0, pro: 0, master: 0 };
+  for (const tier of latestPlanByUser.values()) {
+    if (tier && tier in counts) {
+      counts[tier] += 1;
+    }
+  }
+
+  return {
+    ...counts,
+    total: counts.basico + counts.pro + counts.master,
+  };
+};
 
 export const recordVisit = async (_req, res) => {
   try {
@@ -26,6 +89,55 @@ export const getVisitStats = async (_req, res) => {
     });
 
     res.json({ pageVisits: total, studentCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const getAdminStats = async (_req, res) => {
+  try {
+    const visits = await prisma.siteStat.findUnique({ where: { key: VISIT_KEY } });
+    const pageVisits = visits?.value ?? 0;
+
+    const studentCount = await prisma.user.count({
+      where: { NOT: { role: 'admin' } },
+    });
+
+    const now = new Date();
+    const thisMonth = getMonthBounds(now);
+    const lastMonth = getPreviousMonthBounds(now);
+
+    const [revenueThisMonthAgg, revenueLastMonthAgg, activeSubscriptions] = await Promise.all([
+      prisma.payment.aggregate({
+        where: {
+          status: { in: SUCCESSFUL_PAYMENT_STATUSES },
+          ...buildRangeFilter(thisMonth.start, thisMonth.end),
+        },
+        _sum: { amount: true },
+      }),
+      prisma.payment.aggregate({
+        where: {
+          status: { in: SUCCESSFUL_PAYMENT_STATUSES },
+          ...buildRangeFilter(lastMonth.start, lastMonth.end),
+        },
+        _sum: { amount: true },
+      }),
+      buildActiveSubscriptions(),
+    ]);
+
+    const revenueThisMonth = Number((revenueThisMonthAgg._sum.amount || 0).toFixed(2));
+    const revenueLastMonth = Number((revenueLastMonthAgg._sum.amount || 0).toFixed(2));
+    const revenueChange = calculateRevenueChange(revenueThisMonth, revenueLastMonth);
+
+    res.json({
+      pageVisits,
+      studentCount,
+      revenueThisMonth,
+      revenueLastMonth,
+      revenueChange,
+      activeSubscriptions,
+      currency: 'USD',
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

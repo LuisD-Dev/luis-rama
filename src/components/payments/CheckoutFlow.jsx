@@ -67,8 +67,16 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
   const handleProceedToPayment = async () => {
     if (!ensureAuthenticated()) return;
 
-    setIntentLoading(true);
     setIntentError(null);
+
+    // The Stripe payment-method endpoint owns creation of the real Payment.
+    // Avoid creating a separate simulated Payment before showing the card form.
+    if (PAYMENTS_ENABLED) {
+      setStep('payment_method');
+      return;
+    }
+
+    setIntentLoading(true);
 
     try {
       const data = await createPaymentIntent(planData.value, userToken);
@@ -79,13 +87,15 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
 
       setPaymentId(data.paymentId);
 
-      if (!PAYMENTS_ENABLED) {
+      if (data.status === 'succeeded') {
         sessionStorage.removeItem(STORAGE_KEY);
         sessionStorage.removeItem('checkout_resume');
         setSucceeded(true);
         setTimeout(() => onComplete?.(), 2400);
+      } else if (data.status === 'pending' || data.status === 'processing') {
+        setIntentError('El pago está pendiente de confirmación. Tu acceso todavía no ha sido activado.');
       } else {
-        setStep('payment_method');
+        setIntentError('No pudimos completar el pago. Inténtalo nuevamente.');
       }
     } catch (err) {
       const status = err.response?.status;
@@ -224,7 +234,10 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
   }
 
   if (step === 'payment_method' && planData) {
-    const handlePaymentSuccess = () => {
+    const handlePaymentSuccess = (_paymentMethodId, payment) => {
+      if (payment?.status !== 'succeeded') return;
+
+      setPaymentId(payment.paymentId ?? null);
       sessionStorage.removeItem(STORAGE_KEY);
       sessionStorage.removeItem('checkout_resume');
       setSucceeded(true);

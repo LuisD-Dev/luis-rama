@@ -17,6 +17,9 @@
     "prisma:studio": "prisma studio",
     "migrate:plan-tiers": "node scripts/migrations/migrate-premium-plan-tier.js",
     "migrate:plan-tiers:dry-run": "node scripts/migrations/migrate-premium-plan-tier.js --dry-run",
+    "payment-status:migrate:dry-run": "node scripts/migratePaymentStatuses.js --dry-run",
+    "payment-status:migrate": "node scripts/migratePaymentStatuses.js --apply",
+    "payments:reconcile": "node scripts/reconcilePayments.js",
     "postinstall": "prisma generate"
   },
   "keywords": [
@@ -40,6 +43,7 @@
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.10.1",
     "pg": "^8.13.0",
+    "stripe": "^17.7.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

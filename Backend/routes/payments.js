@@ -1,8 +1,12 @@
 import express from 'express';
 import validate from '../middleware/validate.js';
 import * as paymentSchemas from '../schemas/payment.schema.js';
-import { createOrReusePayment } from '../services/paymentService.js';
-import { checkout, createPaymentIntent, confirmPaymentIntent } from '../controllers/paymentsController.js';
+import {
+  createOrReusePayment,
+  PaymentServiceError,
+} from '../services/paymentService.js';
+import { PaymentTransitionError } from '../services/paymentStateMachine.js';
+import { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook } from '../controllers/paymentsController.js';
 import { verifyToken, adminOnly } from '../middleware/auth.js';
 import prisma from '../utils/prismaClient.js';
 import { evaluate, collectSignals, persistDecision, getMode, hashIp, getClientIp, httpStatusForDecision, withRiskLock } from '../services/riskEngine.js';
@@ -120,34 +124,28 @@ router.post(
         return { payment, guard };
       });
 
-      if (outcome.blocked) {
-        const { guard } = outcome;
-        const status = httpStatusForDecision(guard.result.decision);
-        const code = guard.result.decision === 'block' ? 'RISK_BLOCK' : 'RISK_CHALLENGE';
-        console.warn({ ipHash: guard.ipHash, userId, decision: guard.result.decision, mode: guard.mode }, 'Risk guard blocked /payment-method');
-        return res.status(status).json({
-          error: guard.result.decision === 'block' ? 'risk_block' : 'risk_challenge',
-          code,
-          decision: guard.result.decision,
-          reasons: guard.result.reasons,
-          message: guard.result.decision === 'challenge' ? 'Re-auth required: please log in again or wait and retry.' : 'Payment blocked by risk policy.',
-        });
-      }
-      if (outcome.replay) {
-        return res.json({ paymentId: outcome.payment.id, stripePaymentIntentId: outcome.payment.stripePaymentIntentId, status: outcome.payment.status, replay: true });
-      }
-      const { payment } = outcome;
-      return res.json({ paymentId: payment.id, stripePaymentIntentId: payment.stripePaymentIntentId, status: payment.status });
+      res.json({
+        paymentId: payment.id,
+        stripePaymentIntentId: payment.stripePaymentIntentId,
+        status: payment.status,
+        planTier: payment.planTier,
+      });
     } catch (err) {
-      if (err?.code === 'RISK_DB_ERROR' || err?.message?.includes('risk_blocked')) {
-        const guard = err.riskResult ? { result: err.riskResult, ipHash: err.ipHash, mode: err.mode } : null;
-        if (guard) {
-          const status = httpStatusForDecision(guard.result.decision);
-          const code = guard.result.decision === 'block' ? 'RISK_BLOCK' : 'RISK_CHALLENGE';
-          return res.status(status).json({ error: guard.result.decision === 'block' ? 'risk_block' : 'risk_challenge', code, decision: guard.result.decision, reasons: guard.result.reasons });
-        }
-        console.error('[risk] DB error fail-closed /payment-method', err.message);
-        return res.status(503).json({ error: 'risk_unavailable', code: 'RISK_DB_ERROR', message: 'Risk checks temporarily unavailable. Try again.' });
+      if (
+        err instanceof PaymentServiceError ||
+        err instanceof PaymentTransitionError
+      ) {
+        const statusCode =
+          Number.isInteger(err.statusCode) &&
+          err.statusCode >= 400 &&
+          err.statusCode <= 599
+            ? err.statusCode
+            : 500;
+        const body = {
+          error: err.clientMessage || err.message || 'Payment request failed',
+          ...(err.code ? { code: err.code } : {}),
+        };
+        return res.status(statusCode).json(body);
       }
       next(err);
     }
@@ -184,42 +182,9 @@ router.post(
   }
 );
 
-// Admin read API: recent blocks/challenges
-router.get('/risk/decisions', verifyToken, adminOnly, async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 50, 200);
-  const decisionFilter = req.query.decision ? String(req.query.decision) : null;
-  const where = {};
-  if (decisionFilter && ['block','challenge','allow'].includes(decisionFilter)) where.decision = decisionFilter;
-  // If no filter, show blocks and challenges by default
-  if (!decisionFilter) where.decision = { in: ['block','challenge'] };
-  const rows = await prisma.riskDecision.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  });
-  res.json({ decisions: rows.map(r => ({ ...r, signals: (()=>{ try{ return JSON.parse(r.signalsJson);}catch{return r.signalsJson;}})() })) });
-});
-
-// Whitelist endpoint
-router.post('/risk/whitelist/:userId', verifyToken, adminOnly, async (req, res) => {
-  const targetId = Number(req.params.userId);
-  const { whitelisted } = req.body;
-  const value = Boolean(whitelisted);
-  const user = await prisma.user.update({ where: { id: targetId }, data: { riskWhitelisted: value } });
-  res.json({ userId: user.id, riskWhitelisted: user.riskWhitelisted });
-});
-router.patch('/risk/whitelist/:userId', verifyToken, adminOnly, async (req, res) => {
-  const targetId = Number(req.params.userId);
-  const { whitelisted } = req.body;
-  const value = whitelisted !== undefined ? Boolean(whitelisted) : true;
-  const user = await prisma.user.update({ where: { id: targetId }, data: { riskWhitelisted: value } });
-  res.json({ userId: user.id, riskWhitelisted: user.riskWhitelisted });
-});
-
-// Alternate admin path for convenience: GET /admin/risk/decisions proxy
-router.get('/admin/decisions', verifyToken, adminOnly, async (req, res) => {
-  const rows = await prisma.riskDecision.findMany({ orderBy: { createdAt: 'desc' }, take: 50 });
-  res.json({ decisions: rows });
-});
+// No verifyToken/validate: Stripe calls this directly and body must stay raw
+// (see express.raw() mounted ahead of express.json() in app.js) so the
+// stripe-signature header can be verified against the exact bytes sent.
+router.post('/webhook', stripeWebhook);
 
 export default router;
