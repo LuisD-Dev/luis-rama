@@ -257,6 +257,35 @@ describe('paymentService', () => {
     expect(completedEvents).toHaveLength(1);
   });
 
+  test('default entitlementWriter bumps plan and epoch together', async () => {
+    const user = await prisma.user.create({
+      data: {
+        email: `epoch-writer-${Date.now()}@example.com`,
+        passwordHash: 'hashed',
+        name: 'Epoch Writer Test',
+        role: 'student',
+        planTier: 'free',
+        entitlementEpoch: 0,
+      },
+    });
+
+    const payment = await createPaymentIntent({
+      userId: user.id,
+      planTier: 'pro',
+      amount: 2499,
+      idempotencyKey: `epoch-writer-${Date.now()}`,
+    });
+
+    await markPaymentCompleted({
+      paymentId: payment.id,
+      subscriptionExternalId: `sub_epoch_writer_${payment.id}`,
+    });
+
+    const updated = await prisma.user.findUnique({ where: { id: user.id } });
+    expect(updated.planTier).toBe('pro');
+    expect(updated.entitlementEpoch).toBe(1);
+  });
+
   test.each([
     { status: 'succeeded', label: 'canonical succeeded' },
     { status: 'completed', label: 'legacy completed' },

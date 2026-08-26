@@ -16,6 +16,16 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ----
 
+**Common fields**
+
+- `entitlement_epoch` / `entitlementEpoch`: Monotonic integer that increments on every plan change. Clients should compare this value across responses; if it changes, cached content is stale and must be refetched.
+
+  Note: for historical reasons, this field is serialized as `entitlement_epoch`
+  (snake_case) in user payloads and as `entitlementEpoch` (camelCase) in
+  content response metadata. Clients must handle both forms.
+
+----
+
 **Auth routes** (`/api/auth`)
 
 - POST /api/auth/signup
@@ -37,7 +47,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 {
   "message": "User created successfully",
   "token": "<jwt>",
-  "user": { "id": 5, "email": "student@example.com", "name": "Student Name", "role": "student", "avatar_url": null }
+  "user": { "id": 5, "email": "student@example.com", "name": "Student Name", "role": "student", "plan_tier": null, "entitlement_epoch": 0, "avatar_url": null }
 }
 ```
 
@@ -59,7 +69,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 {
   "message": "Login successful",
   "token": "<jwt>",
-  "user": { "id": 5, "email": "student@example.com", "name": "Student Name", "role": "student", "plan_tier": null, "avatar_url": null }
+  "user": { "id": 5, "email": "student@example.com", "name": "Student Name", "role": "student", "plan_tier": null, "entitlement_epoch": 0, "avatar_url": null }
 }
 ```
 
@@ -70,7 +80,7 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 
 ```json
 {
-  "user": { "id": 5, "email": "student@example.com", "name": "Student Name", "role": "student", "plan_tier": null, "avatar_url": null }
+  "user": { "id": 5, "email": "student@example.com", "name": "Student Name", "role": "student", "plan_tier": null, "entitlement_epoch": 0, "avatar_url": null }
 }
 ```
 
@@ -133,10 +143,22 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
 ```
 
 - PATCH /api/auth/students/:id/plan
-  - Description: Admin updates a student's `plan_tier` (examples: `basico`, `pro`, `master`)
+  - Description: Admin updates a student's `plan_tier` (examples: `basico`, `pro`, `master`). Send `null` or `""` to remove the plan (downgrade to free).
   - Auth required: Yes
   - Role: admin only
   - Body example: `{ "plan_tier": "pro" }`
+  - Response example:
+
+```json
+{
+  "message": "Plan pro assigned successfully",
+  "student": { "id": 2, "email": "s1@...", "name": "S1", "plan_tier": "pro", "entitlement_epoch": 4 }
+}
+```
+
+  - Note: `entitlement_epoch` increments even when the assigned `plan_tier` is
+    identical to the student's current plan. This is intentional — it forces
+    client cache invalidation as a security measure, not an optimization.
 
 - DELETE /api/auth/students/:id
   - Description: Admin deletes a student account
@@ -153,7 +175,10 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
   - Response example:
 
 ```json
-{ "content": [ { "id": 1, "title": "Lesson 1", "type": "video", "url": "https://...", "plan_tier": "free", "uploaded_by": 2 } ] }
+{
+  "content": [ { "id": 1, "title": "Lesson 1", "type": "video", "url": "https://...", "plan_tier": "free", "uploaded_by": 2 } ],
+  "meta": { "entitlementEpoch": 3 }
+}
 ```
 
 - GET /api/content/free

@@ -17,6 +17,7 @@ model User {
   resetPin          String?   @map("reset_pin")
   resetPinExpiresAt DateTime? @map("reset_pin_expires_at")
   planTier          String?   @map("plan_tier")
+  entitlementEpoch  Int       @default(0) @map("entitlement_epoch")
   stripeCustomerId  String?   @unique @map("stripe_customer_id")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
