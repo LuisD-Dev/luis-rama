@@ -150,16 +150,18 @@ export async function collectSignals({ userId, ipHash, paymentMethodId, planTier
     }
 
     if (ipHash && ipHash !== 'unknown') {
-      try {
-        failsIpHour = await prisma.payment.count({
-          where: { ipHash, status: 'failed', createdAt: { gte: hourAgo } },
-        });
-      } catch (_) {
-        failsIpHour = 0;
-      }
+      failsIpHour = await prisma.payment.count({
+        where: { ipHash, status: 'failed', createdAt: { gte: hourAgo } },
+      });
     }
-  } catch (_) {
-    // graceful fallback
+  } catch (e) {
+    console.error('[riskEngine] collectSignals DB error', { userId, ipHash, error: e?.message });
+    const mode = getMode();
+    if (mode === 'enforce') {
+      // fail-closed in enforce: propagate error so caller can block
+      throw new Error(`risk_db_error: ${e?.message}`);
+    }
+    // in shadow, fall back to zeros (allow) but error is logged
   }
 
   return {
@@ -200,10 +202,28 @@ export async function persistDecision({ userId, ipHash, path, signals, score, de
             mode,
           },
         });
-      } catch {}
+      } catch (inner) {
+        console.error('[riskEngine] persistDecision retry failed', { error: inner?.message });
+      }
+    }
+    console.error('[riskEngine] persistDecision DB error', { ipHash, path, decision, mode, error: e?.message });
+    const currentMode = mode || getMode();
+    if (currentMode === 'enforce') {
+      // in enforce, audit failure is critical — propagate so caller can fail-closed
+      throw new Error(`risk_persist_error: ${e?.message}`);
     }
     return null;
   }
 }
 
-export default { evaluate, getThresholds, getMode, hashIp, getClientIp, httpStatusForDecision, collectSignals, persistDecision, DEFAULT_THRESHOLDS };
+const _riskLocks = new Map();
+export async function withRiskLock(key, fn) {
+  while (_riskLocks.has(key)) {
+    try { await _riskLocks.get(key); } catch {}
+  }
+  const p = (async () => fn())();
+  _riskLocks.set(key, p);
+  try { return await p; } finally { _riskLocks.delete(key); }
+}
+
+export default { evaluate, getThresholds, getMode, hashIp, getClientIp, httpStatusForDecision, collectSignals, persistDecision, withRiskLock, DEFAULT_THRESHOLDS };

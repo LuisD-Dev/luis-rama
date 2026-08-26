@@ -42,15 +42,20 @@ Every payment attempt persists a row, including **idempotent replays** (existing
 Env (or JSON overrides passed to `evaluate`):
 
 ```
-RISK_ENGINE_MODE=shadow|enforce          # default shadow
+RISK_ENGINE_MODE=shadow|enforce          # default shadow — start with shadow in prod, switch to enforce after metrics
 RISK_THRESHOLD_ATTEMPTS_USER_HOUR=8
 RISK_THRESHOLD_DISTINCT_PM_DAY=4
 RISK_THRESHOLD_FAILS_IP_HOUR=12
 RISK_ACCOUNT_AGE_MINUTES=30
-RISK_IP_HASH_SALT=<secret>               # optional, for IP hash
+RISK_IP_HASH_SALT=<secreto-largo-y-aleatorio>  # required in prod; use 32+ random chars
 ```
 
-`getMode()` and `getThresholds()` read env with defaults documented in `riskEngine.DEFAULT_THRESHOLDS`.
+`getMode()` and `getThresholds()` read env with defaults documented in `riskEngine.DEFAULT_THRESHOLDS`. JSON file `config/riskThresholds.json` is optional if `RISK_CONFIG_PATH` is set.
+
+Production rollout:
+1. Deploy with `RISK_ENGINE_MODE=shadow` and `RISK_IP_HASH_SALT=<secret>` set.
+2. Observe `GET /api/payments/risk/decisions` for a day.
+3. Switch to `enforce` when false positives are acceptable.
 
 ## Wiring
 
@@ -110,6 +115,15 @@ To remove: set `whitelisted: false` or `risk_whitelisted = 0/false`.
 ## Idempotency
 
 Client sends `Idempotency-Key` header or `idempotencyKey` body field. Server checks `Payment.findUnique({ idempotencyKey })` first. On replay it returns `{ replay: true, ... }` without calling Stripe, but still persists a `RiskDecision`.
+
+## Concurrency
+
+- `Teclia-Academy/Backend/routes/payments.js:79` and `Backend/controllers/paymentsController.js:69` serialize per `userId:ipHash` with `riskEngine.withRiskLock` (in-memory mutex, single-instance). This prevents two concurrent requests from reading the same counters before either inserts, fixing the race where 8th and 9th parallel requests could both pass.
+- For strict multi-instance production, replace `withRiskLock` with a distributed lock (Redis `SET NX` or DB advisory lock). The pending `Payment` row is inserted before Stripe call, so `idempotencyKey` unique constraint also guarantees no double charge. For highest strictness, run `collectSignals` + `persistDecision` + pending insert inside a single `prisma.$transaction` with `SERIALIZABLE` isolation (SQLite uses `BEGIN IMMEDIATE`; Postgres uses `FOR UPDATE`).
+
+## Failure handling
+
+- `riskEngine.js:119` `collectSignals` and `persistDecision` log DB errors. In `shadow` they fall back to `allow` (fail-open, logged). In `enforce` they throw `RISK_DB_ERROR` and routes return `503 { code: RISK_DB_ERROR }` (fail-closed) — see `routes/payments.js:12` and `Backend/controllers/paymentsController.js:80`. This prevents DB outages from silently allowing fraud in `enforce`.
 
 ## Security notes
 

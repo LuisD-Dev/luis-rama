@@ -133,6 +133,39 @@ describe('risk guard integration', () => {
     expect(res.statusCode).toBe(423);
   });
 
+  test('enforce blocks after 12 failed payments per IP', async () => {
+    process.env.RISK_ENGINE_MODE = 'enforce';
+    const { hashIp } = await import('../services/riskEngine.js');
+    const ipHashes = [hashIp('127.0.0.1'), hashIp('::ffff:127.0.0.1'), hashIp('::1')];
+    // create 12 failed payments for each possible hash to ensure count hits threshold
+    for (const h of ipHashes) {
+      for (let i = 0; i < 12; i++) {
+        await prisma.payment.create({
+          data: {
+            userId,
+            amount: 999,
+            currency: 'usd',
+            planTier: 'basico',
+            provider: 'stripe',
+            idempotencyKey: `fail-ip-${h}-${i}-${Date.now()}-${Math.random()}`,
+            status: 'failed',
+            ipHash: h,
+          },
+        });
+      }
+    }
+    const res = await request(app).post('/api/payments/payment-method')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ paymentMethodId: 'pm_ip_fail', planTier: 'basico', idempotencyKey: `ip-fail-${Date.now()}` });
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('RISK_BLOCK');
+    // verify DB threshold counted — block due to failsIpHour
+    const decisions = await prisma.riskDecision.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } });
+    expect(decisions[0].decision).toBe('block');
+    const signals = JSON.parse(decisions[0].signalsJson);
+    expect(signals.failsIpHour).toBeGreaterThanOrEqual(12);
+  });
+
   test('idempotent replay still records decision but skips double-charge', async () => {
     process.env.RISK_ENGINE_MODE = 'shadow';
     const key = `replay-${Date.now()}`;

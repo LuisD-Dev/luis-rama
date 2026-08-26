@@ -5,7 +5,8 @@ import { createOrReusePayment } from '../services/paymentService.js';
 import { checkout, createPaymentIntent, confirmPaymentIntent } from '../controllers/paymentsController.js';
 import { verifyToken, adminOnly } from '../middleware/auth.js';
 import prisma from '../utils/prismaClient.js';
-import { evaluate, collectSignals, persistDecision, getMode, hashIp, getClientIp, httpStatusForDecision } from '../services/riskEngine.js';
+import { evaluate, collectSignals, persistDecision, getMode, hashIp, getClientIp, httpStatusForDecision, withRiskLock } from '../services/riskEngine.js';
+import { createPaymentIntent as createPaymentIntentService } from '../services/paymentService.js';
 
 const router = express.Router();
 
@@ -14,19 +15,36 @@ async function riskGuard(req, { planTier, paymentMethodId, path }) {
   const ipHash = hashIp(ip);
   const userId = req.user?.id;
   const mode = getMode();
-  const signalsRaw = await collectSignals({ userId, ipHash, paymentMethodId, planTier, prismaClient: prisma });
+  let signalsRaw;
+  try {
+    signalsRaw = await collectSignals({ userId, ipHash, paymentMethodId, planTier, prismaClient: prisma });
+  } catch (e) {
+    console.error('[riskGuard] collectSignals failed', { ipHash, userId, mode, error: e?.message });
+    if (mode === 'enforce') {
+      // fail-closed: do not allow payment when DB is unavailable
+      throw Object.assign(new Error('risk_db_error'), { statusCode: 503, code: 'RISK_DB_ERROR', ipHash, mode });
+    }
+    // shadow: allow with logged error
+    signalsRaw = { attemptsUserHour: 0, distinctPMsUserDay: 0, failsIpHour: 0, accountAgeMinutes: null, planTier, isWhitelisted: false, _dbError: true };
+  }
   const result = evaluate(signalsRaw);
-  // Persist decision for every attempt (even replay) - snapshot signals
-  await persistDecision({
-    userId,
-    ipHash,
-    path: path || req.path,
-    signals: result.signals,
-    score: result.score,
-    decision: result.decision,
-    mode,
-    prismaClient: prisma,
-  });
+  try {
+    await persistDecision({
+      userId,
+      ipHash,
+      path: path || req.path,
+      signals: result.signals,
+      score: result.score,
+      decision: result.decision,
+      mode,
+      prismaClient: prisma,
+    });
+  } catch (e) {
+    console.error('[riskGuard] persistDecision failed', { ipHash, userId, mode, error: e?.message });
+    if (mode === 'enforce') {
+      throw Object.assign(new Error('risk_persist_error'), { statusCode: 503, code: 'RISK_DB_ERROR', ipHash, mode });
+    }
+  }
   return { ipHash, mode, result, signalsRaw };
 }
 
@@ -49,7 +67,13 @@ router.post('/intent', verifyToken, async (req, res, next) => {
     // Attach ipHash for payment creation
     req._riskIpHash = guard.ipHash;
     return createPaymentIntent(req, res);
-  } catch (e) { next(e); }
+  } catch (e) {
+    if (e?.code === 'RISK_DB_ERROR') {
+      console.error('[risk] DB error fail-closed /intent', e.message);
+      return res.status(503).json({ error: 'risk_unavailable', code: 'RISK_DB_ERROR', message: 'Risk checks temporarily unavailable. Try again.' });
+    }
+    next(e);
+  }
 });
 router.post('/intent/:id/confirm', verifyToken, adminOnly, confirmPaymentIntent);
 
@@ -67,14 +91,40 @@ router.post(
         return res.status(400).json({ error: 'idempotencyKey header or body field is required' });
       }
 
-      // Idempotent replay detection: if payment already exists, still record risk decision but skip double Stripe charge
-      const existing = await prisma.payment.findUnique({ where: { idempotencyKey: effectiveIdempotencyKey } });
-      const guard = await riskGuard(req, { planTier, paymentMethodId, path: '/api/payments/payment-method' });
-      if (guard.mode === 'enforce' && guard.result.decision !== 'allow') {
+      // Concurrency: serialize per user+IP to prevent race on counters (single-instance). For multi-instance, use Redis/distributed lock.
+      const ipForLock = hashIp(getClientIp(req));
+      const lockKey = `${userId}:${ipForLock}`;
+      const outcome = await withRiskLock(lockKey, async () => {
+        // Idempotent replay detection: if payment already exists, still record risk decision but skip double Stripe charge
+        const existing = await prisma.payment.findUnique({ where: { idempotencyKey: effectiveIdempotencyKey } });
+        const guard = await riskGuard(req, { planTier, paymentMethodId, path: '/api/payments/payment-method' });
+        if (guard.mode === 'enforce' && guard.result.decision !== 'allow') {
+          return { blocked: true, guard, existing };
+        }
+        if (existing) {
+          if (!existing.ipHash) {
+            await prisma.payment.update({ where: { id: existing.id }, data: { ipHash: guard.ipHash } }).catch(()=>{});
+          }
+          return { replay: true, payment: existing, guard };
+        }
+        const payment = await createOrReusePayment({
+          userId,
+          paymentMethodId,
+          planTier,
+          idempotencyKey: effectiveIdempotencyKey,
+          ipHash: guard.ipHash,
+        });
+        if (payment && !payment.ipHash) {
+          await prisma.payment.update({ where: { id: payment.id }, data: { ipHash: guard.ipHash } }).catch(()=>{});
+        }
+        return { payment, guard };
+      });
+
+      if (outcome.blocked) {
+        const { guard } = outcome;
         const status = httpStatusForDecision(guard.result.decision);
         const code = guard.result.decision === 'block' ? 'RISK_BLOCK' : 'RISK_CHALLENGE';
         console.warn({ ipHash: guard.ipHash, userId, decision: guard.result.decision, mode: guard.mode }, 'Risk guard blocked /payment-method');
-        // Even for replay, enforce block/challenge
         return res.status(status).json({
           error: guard.result.decision === 'block' ? 'risk_block' : 'risk_challenge',
           code,
@@ -83,30 +133,22 @@ router.post(
           message: guard.result.decision === 'challenge' ? 'Re-auth required: please log in again or wait and retry.' : 'Payment blocked by risk policy.',
         });
       }
-
-      if (existing) {
-        // Still update ipHash if missing for audit
-        if (!existing.ipHash) {
-          await prisma.payment.update({ where: { id: existing.id }, data: { ipHash: guard.ipHash } }).catch(()=>{});
-        }
-        return res.json({ paymentId: existing.id, stripePaymentIntentId: existing.stripePaymentIntentId, status: existing.status, replay: true });
+      if (outcome.replay) {
+        return res.json({ paymentId: outcome.payment.id, stripePaymentIntentId: outcome.payment.stripePaymentIntentId, status: outcome.payment.status, replay: true });
       }
-
-      const payment = await createOrReusePayment({
-        userId,
-        paymentMethodId,
-        planTier,
-        idempotencyKey: effectiveIdempotencyKey,
-        ipHash: guard.ipHash,
-      });
-
-      // Ensure ipHash stored
-      if (payment && !payment.ipHash) {
-        await prisma.payment.update({ where: { id: payment.id }, data: { ipHash: guard.ipHash } }).catch(()=>{});
-      }
-
-      res.json({ paymentId: payment.id, stripePaymentIntentId: payment.stripePaymentIntentId, status: payment.status });
+      const { payment } = outcome;
+      return res.json({ paymentId: payment.id, stripePaymentIntentId: payment.stripePaymentIntentId, status: payment.status });
     } catch (err) {
+      if (err?.code === 'RISK_DB_ERROR' || err?.message?.includes('risk_blocked')) {
+        const guard = err.riskResult ? { result: err.riskResult, ipHash: err.ipHash, mode: err.mode } : null;
+        if (guard) {
+          const status = httpStatusForDecision(guard.result.decision);
+          const code = guard.result.decision === 'block' ? 'RISK_BLOCK' : 'RISK_CHALLENGE';
+          return res.status(status).json({ error: guard.result.decision === 'block' ? 'risk_block' : 'risk_challenge', code, decision: guard.result.decision, reasons: guard.result.reasons });
+        }
+        console.error('[risk] DB error fail-closed /payment-method', err.message);
+        return res.status(503).json({ error: 'risk_unavailable', code: 'RISK_DB_ERROR', message: 'Risk checks temporarily unavailable. Try again.' });
+      }
       next(err);
     }
   }
@@ -132,7 +174,13 @@ router.post(
       }
       req._riskIpHash = guard.ipHash;
       return checkout(req, res, next);
-    } catch(e){ next(e); }
+    } catch(e){
+      if (e?.code === 'RISK_DB_ERROR') {
+        console.error('[risk] DB error fail-closed /checkout', e.message);
+        return res.status(503).json({ error: 'risk_unavailable', code: 'RISK_DB_ERROR', message: 'Risk checks temporarily unavailable. Try again.' });
+      }
+      next(e);
+    }
   }
 );
 

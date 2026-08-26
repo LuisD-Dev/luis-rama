@@ -4,6 +4,7 @@ import { useAuth } from '../../hooks/useAuth.js';
 import StripeCardForm from './StripeCardForm.jsx';
 import { Confetti } from '../common/Confetti.jsx';
 import { createPaymentIntent } from '../../services/api.js';
+import { getRiskMessage } from '../../i18n/messages.js';
 
 const PAYMENTS_ENABLED = import.meta.env.VITE_PAYMENTS_ENABLED === 'true';
 
@@ -89,14 +90,17 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
     } catch (err) {
       const status = err.response?.status;
       const data = err.response?.data || {};
-      if (data.code === 'RISK_CHALLENGE' || data.code === 'RISK_BLOCK' || status === 423 || status === 403 && data.error?.startsWith('risk_')) {
+      if (data.code === 'RISK_CHALLENGE' || data.code === 'RISK_BLOCK' || status === 423 || (status === 403 && data.error?.startsWith('risk_')) || status === 503 && data.code === 'RISK_DB_ERROR') {
         if (data.code === 'RISK_CHALLENGE' || status === 423) {
-          setIntentError('Verificación requerida: por favor inicia sesión de nuevo o espera unos minutos antes de reintentar.');
+          setIntentError(getRiskMessage('RISK_CHALLENGE'));
+        } else if (data.code === 'RISK_BLOCK') {
+          setIntentError(getRiskMessage('RISK_BLOCK'));
+        } else if (data.code === 'RISK_DB_ERROR') {
+          setIntentError('Servicio de riesgo no disponible. Intenta nuevamente en unos segundos.');
         } else {
-          setIntentError('Pago bloqueado por controles de seguridad. Contacta soporte si crees que es un error.');
+          setIntentError(getRiskMessage(data.code || 'RISK_BLOCK'));
         }
-        if (status === 423) {
-          // Trigger re-auth after short delay
+        if (status === 423 || data.code === 'RISK_CHALLENGE') {
           try { const { invokeLogout } = await import('../../utils/authSession.js'); invokeLogout({ reason: 'risk_challenge', showToast: true, redirectTo: '/auth/login' }); } catch {}
         }
       } else if (err.response?.data?.error === 'invalid_plan') {

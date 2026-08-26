@@ -242,6 +242,55 @@ Routes are grouped below. All examples assume the base URL prefix `/api`.
   - Description: Existing Stripe Elements path. Confirms a PaymentIntent for a tokenized `paymentMethodId` (not hosted Checkout).
   - Auth required: Yes (Bearer token)
   - Body: `{ "paymentMethodId": "pm_...", "planTier": "basico", "idempotencyKey": "..." }` (idempotency key may also be sent as `Idempotency-Key` header)
+  - Risk guard: before Stripe, `riskEngine` computes `allow|challenge|block` (see Risk Engine below). In `shadow` logs `RiskDecision` but allows; in `enforce` returns `423 RISK_CHALLENGE` or `403 RISK_BLOCK`. Replay with same `Idempotency-Key` returns `{ replay: true }` but still audits.
+
+- POST /api/payments/intent
+  - Description: Temporary simulation — creates a pending payment intent (basico/pro/master). Risk guard runs before creation (same thresholds as `payment-method`). Idempotency not required (server generates `intent_*` key).
+  - Auth required: Yes (Bearer token, non-admin)
+  - Risk responses: `423 { code: RISK_CHALLENGE }`, `403 { code: RISK_BLOCK }`, `503 { code: RISK_DB_ERROR }` (fail-closed in `enforce`)
+
+- GET /api/payments/risk/decisions
+  - Description: Admin-only — list recent `RiskDecision` (blocks/challenges by default). Used to audit fraud attempts.
+  - Auth required: Yes (admin)
+  - Query: `limit` (default 50, max 200), `decision=allow|challenge|block` (default `block,challenge`)
+  - Response 200:
+    ```json
+    {
+      "decisions": [
+        {
+          "id": 123,
+          "userId": 5,
+          "ipHash": "a1b2…",
+          "path": "/api/payments/payment-method",
+          "signalsJson": "{\"attemptsUserHour\":8,…}",
+          "signals": { "attemptsUserHour": 8, "distinctPMsUserDay": 1, "failsIpHour": 0, "accountAgeMinutes": 5, "planTier": "master" },
+          "score": 25,
+          "decision": "challenge",
+          "mode": "enforce",
+          "createdAt": "2026-08-26T00:00:00.000Z"
+        }
+      ]
+    }
+    ```
+
+- POST /api/payments/risk/whitelist/:userId
+- PATCH /api/payments/risk/whitelist/:userId
+  - Description: Admin-only — toggle `User.riskWhitelisted`. Whitelisted users always `allow` (`reasons: ["whitelisted"]`) but still audited.
+  - Auth required: Yes (admin)
+  - Body: `{ "whitelisted": true }` (PATCH defaults to `true` if omitted)
+  - Response 200: `{ "userId": 5, "riskWhitelisted": true }`
+
+**Risk Engine — codes & thresholds**
+
+| Code | HTTP | Error | When |
+|------|------|-------|------|
+| `RISK_CHALLENGE` | 423 | `risk_challenge` | 8 attempts/user/1h or new account (<30m) + `master` |
+| `RISK_BLOCK` | 403 | `risk_block` | 4 distinct PMs/user/24h or 12 fails/IP/1h |
+| `RISK_DB_ERROR` | 503 | `risk_unavailable` | DB unavailable — fail-closed in `enforce` (blocks), fail-open in `shadow` (allows but logs) |
+
+Env: `RISK_ENGINE_MODE=shadow|enforce` (default `shadow`), `RISK_THRESHOLD_ATTEMPTS_USER_HOUR=8`, `RISK_THRESHOLD_DISTINCT_PM_DAY=4`, `RISK_THRESHOLD_FAILS_IP_HOUR=12`, `RISK_ACCOUNT_AGE_MINUTES=30`, `RISK_IP_HASH_SALT=<secret>`. JSON overrides via `evaluate(signals, thresholds)` or `config/riskThresholds.json`.
+
+See `Backend/docs/risk-engine.md` and `Backend/RISK_RUNBOOK.md`.
 
 ----
 
