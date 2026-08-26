@@ -132,6 +132,7 @@ export async function createPaymentIntent({
   paymentMethodId = null,
   stripePaymentIntentId = null,
   stripeCheckoutSessionId = null,
+  ipHash = null,
   tx = prisma,
 } = {}) {
   if (!idempotencyKey) {
@@ -161,6 +162,7 @@ export async function createPaymentIntent({
         stripePaymentIntentId,
         stripeCheckoutSessionId,
         idempotencyKey,
+        ipHash,
         metadata: serializeMetadata(metadata),
         status: 'pending',
       },
@@ -436,6 +438,7 @@ export async function createOrReusePayment({
   paymentMethodId,
   planTier,
   idempotencyKey,
+  ipHash = null,
 }) {
   if (!idempotencyKey) throw new Error('idempotencyKey required');
 
@@ -452,6 +455,7 @@ export async function createOrReusePayment({
       provider: 'stripe',
       paymentMethodId,
       idempotencyKey,
+      ipHash,
       metadata: { source: 'payment_method' },
       tx,
     });
@@ -516,7 +520,7 @@ export async function createOrReusePayment({
  * Create a Stripe Checkout Session for the given plan and persist a pending Payment.
  * @returns {{ checkoutUrl: string, sessionId: string, payment: object }}
  */
-export async function createCheckoutSession({ userId, plan }) {
+export async function createCheckoutSession({ userId, plan, ipHash = null }) {
   const normalizedPlan = assertPaidPlan(plan);
   const priceId = resolvePriceId(normalizedPlan);
   if (!priceId) {
@@ -553,6 +557,7 @@ export async function createCheckoutSession({ userId, plan }) {
     currency: 'usd',
     provider: 'stripe',
     idempotencyKey,
+    ipHash,
     metadata: { source: 'checkout' },
   });
 

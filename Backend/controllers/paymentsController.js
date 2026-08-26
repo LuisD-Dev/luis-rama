@@ -8,8 +8,9 @@ export const checkout = async (req, res) => {
   try {
     const userId = req.user.id;
     const { plan } = req.body;
+    const ipHash = req._riskIpHash || null;
 
-    const { checkoutUrl, sessionId } = await createCheckoutSession({ userId, plan });
+    const { checkoutUrl, sessionId } = await createCheckoutSession({ userId, plan, ipHash });
 
     return res.json({ checkoutUrl, sessionId });
   } catch (err) {
@@ -46,6 +47,7 @@ export const createPaymentIntent = async (req, res) => {
       return res.status(403).json({ error: 'admin_not_allowed' });
     }
 
+    const ipHash = req._riskIpHash || null;
     const payment = await prisma.payment.create({
       data: {
         userId,
@@ -54,6 +56,7 @@ export const createPaymentIntent = async (req, res) => {
         currency: 'usd',
         status: 'pending',
         provider: 'simulated',
+        ipHash,
         idempotencyKey: `intent_${userId}_${plan_tier}_${crypto.randomUUID()}`,
       },
     });

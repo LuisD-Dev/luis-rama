@@ -23,6 +23,7 @@ export const setupTestDb = () => {
     if (!dbReady) return;
 
     try {
+      await prisma.riskDecision.deleteMany().catch(()=>{});
       await prisma.paymentEvent.deleteMany();
       await prisma.subscription.deleteMany();
       await prisma.payment.deleteMany();

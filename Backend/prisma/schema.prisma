@@ -17,10 +17,12 @@ model User {
   resetPin          String?   @map("reset_pin")
   resetPinExpiresAt DateTime? @map("reset_pin_expires_at")
   planTier          String?   @map("plan_tier")
+  riskWhitelisted   Boolean   @default(false) @map("risk_whitelisted")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
   payments          Payment[]
   subscriptions     Subscription[]
+  riskDecisions     RiskDecision[]
 
   @@map("users")
 }
@@ -60,6 +62,7 @@ model Payment {
   stripePaymentIntentId   String?   @unique @map("stripe_payment_intent_id")
   stripeCheckoutSessionId String?   @unique @map("stripe_checkout_session_id")
   idempotencyKey          String    @unique @map("idempotency_key")
+  ipHash                  String?   @map("ip_hash")
   metadata                String?
   createdAt               DateTime  @default(now()) @map("created_at")
   updatedAt               DateTime  @updatedAt @map("updated_at")
@@ -68,6 +71,7 @@ model Payment {
   events PaymentEvent[]
 
   @@index([userId, createdAt])
+  @@index([ipHash, createdAt])
   @@map("payments")
 }
 
@@ -104,4 +108,23 @@ model PaymentEvent {
   payment Payment? @relation(fields: [paymentId], references: [id])
 
   @@map("payment_events")
+}
+
+model RiskDecision {
+  id          Int      @id @default(autoincrement())
+  userId      Int?     @map("user_id")
+  ipHash      String   @map("ip_hash")
+  path        String
+  signalsJson String   @map("signals_json")
+  score       Int
+  decision    String
+  mode        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([ipHash, createdAt])
+  @@index([decision, createdAt])
+  @@map("risk_decisions")
 }

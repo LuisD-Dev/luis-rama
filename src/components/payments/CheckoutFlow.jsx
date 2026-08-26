@@ -87,7 +87,19 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
         setStep('payment_method');
       }
     } catch (err) {
-      if (err.response?.data?.error === 'invalid_plan') {
+      const status = err.response?.status;
+      const data = err.response?.data || {};
+      if (data.code === 'RISK_CHALLENGE' || data.code === 'RISK_BLOCK' || status === 423 || status === 403 && data.error?.startsWith('risk_')) {
+        if (data.code === 'RISK_CHALLENGE' || status === 423) {
+          setIntentError('Verificación requerida: por favor inicia sesión de nuevo o espera unos minutos antes de reintentar.');
+        } else {
+          setIntentError('Pago bloqueado por controles de seguridad. Contacta soporte si crees que es un error.');
+        }
+        if (status === 423) {
+          // Trigger re-auth after short delay
+          try { const { invokeLogout } = await import('../../utils/authSession.js'); invokeLogout({ reason: 'risk_challenge', showToast: true, redirectTo: '/auth/login' }); } catch {}
+        }
+      } else if (err.response?.data?.error === 'invalid_plan') {
         setIntentError('El plan seleccionado no es válido. Intenta con otro.');
       } else if (err.message?.includes('Network Error') || err.message?.includes('Failed to fetch')) {
         setIntentError('No se pudo conectar con el servidor. Verifica tu conexión e intenta de nuevo.');
