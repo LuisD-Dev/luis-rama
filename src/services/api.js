@@ -2,7 +2,7 @@ import axios from 'axios';
 import { getRequestSignal, invokeLogout } from '../utils/authSession.js';
 import { getCsrfToken, getStoredToken, generateCsrfToken } from '../utils/jwt.js';
 
-export const BACKEND_BASE_URL = 'https://teclia-academia-2.onrender.com';
+export const BACKEND_BASE_URL = import.meta.env?.VITE_API_BASE_URL?.replace(/\/api\/?$/, '') || (typeof window !== 'undefined' && window.location.hostname === 'localhost' ? 'http://localhost:3001' : 'https://teclia-academia-2.onrender.com');
 const API_BASE_URL = `${BACKEND_BASE_URL}/api`;
 
 const api = axios.create({
@@ -14,21 +14,21 @@ const api = axios.create({
 
 const AUTH_ENDPOINTS = /\/auth\/(login|signup|forgot-password|reset-password)/;
 
-// Add JWT token, CSRF token, and abort signal to requests
+// Add JWT token and abort signal to requests
+// Note: CSRF protection via Authorization header (Bearer) is sufficient for JWT (not cookie-based).
+// We keep X-CSRF-Token for defense-in-depth where needed, but only once.
 api.interceptors.request.use((config) => {
   const token = getStoredToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
-  let csrf = getCsrfToken();
-  if (!csrf) {
-    csrf = generateCsrfToken();
-  }
-  if (csrf && !config.url.includes('/auth/')) {
-    config.headers['X-CSRF-Token'] = csrf;
-  }
-  if (csrf && !config.url.includes('/auth/')) {
-    config.headers['X-CSRF-Token'] = csrf;
+  // Only add CSRF for non-auth, non-GET where backend might check it
+  if (!config.url.includes('/auth/') && config.method && !['get', 'head', 'options'].includes(config.method.toLowerCase())) {
+    let csrf = getCsrfToken();
+    if (!csrf) {
+      csrf = generateCsrfToken();
+    }
+    if (csrf) config.headers['X-CSRF-Token'] = csrf;
   }
   config.signal = getRequestSignal();
   return config;
@@ -109,6 +109,25 @@ export const contentService = {
     api.get(`/content/${id}`),
   getFreeContent: () =>
     api.get('/content/free'),
+};
+
+export const paymentsService = {
+  submitPaymentMethod: ({ planTier, paymentMethodId, idempotencyKey }) =>
+    api.post('/payments/payment-method', { planTier, paymentMethodId, idempotencyKey }),
+  getPaymentStatus: (paymentId) =>
+    api.get(`/payments/${paymentId}`),
+};
+
+// PCI invariant: never send PAN (card number) to backend; only Stripe paymentMethodId
+// Keep helper for generating idempotency keys (cryptographically random if possible)
+export const generateIdempotencyKey = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 };
 
 export default api;

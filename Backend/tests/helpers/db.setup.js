@@ -23,6 +23,7 @@ export const setupTestDb = () => {
     if (!dbReady) return;
 
     try {
+      await prisma.payment.deleteMany();
       await prisma.content.deleteMany();
       await prisma.siteStat.deleteMany();
       await prisma.user.deleteMany({

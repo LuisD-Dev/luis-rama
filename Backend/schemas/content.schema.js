@@ -44,6 +44,9 @@ export const createContent = z.object({
   type: contentType,
   ...bodyOrDescription.shape,
   tags: z.array(optionalTag).optional(),
+  url: z.string().url({ message: 'URL must be a valid URL' }).optional(),
+  is_free: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  plan_tier: z.string().optional(),
 });
 
 export const updateContent = z

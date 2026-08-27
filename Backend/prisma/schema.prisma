@@ -19,6 +19,7 @@ model User {
   planTier          String?   @map("plan_tier")
   createdAt         DateTime? @default(now()) @map("created_at")
   content           Content[]
+  payments          Payment[]
 
   @@map("users")
 }
@@ -36,6 +37,27 @@ model Content {
   uploader    User      @relation(fields: [uploadedBy], references: [id])
 
   @@map("content")
+}
+
+model Payment {
+  id                    Int      @id @default(autoincrement())
+  userId                Int      @map("user_id")
+  planTier              String   @map("plan_tier")
+  amount                Int
+  currency              String   @default("usd")
+  status                String
+  code                  String
+  idempotencyKey        String   @map("idempotency_key")
+  stripePaymentIntentId String?  @map("stripe_payment_intent_id")
+  stripePaymentMethodId String?  @map("stripe_payment_method_id")
+  clientMessage         String?  @map("client_message")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+  user                  User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+  @@map("payments")
 }
 
 model SiteStat {

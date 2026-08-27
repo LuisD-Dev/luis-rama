@@ -8,6 +8,7 @@ import { globalLimiter } from './middleware/rateLimiter.js';
 import authRoutes from './routes/auth.js';
 import contentRoutes from './routes/content.js';
 import statsRoutes from './routes/stats.js';
+import paymentRoutes from './routes/payments.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,17 +16,27 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 app.set('trust proxy', 1);
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // allow Vite dev; enable strict CSP in prod if needed
+  crossOriginEmbedderPolicy: false,
+}));
 app.use(globalLimiter);
 
 // Ensure a JWT secret exists for tests/development if not provided
 if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = 'teclia_dev_secret_change_this';
 }
+if (process.env.NODE_ENV === 'production' && process.env.JWT_SECRET === 'teclia_dev_secret_change_this') {
+  console.error('⚠️  JWT_SECRET is using default dev value in production! Set a strong random secret.');
+}
 
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+const allowedOrigins = (process.env.FRONTEND_URL || process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const corsOptions = allowedOrigins.length > 0
+  ? { origin: allowedOrigins, credentials: true }
+  : { origin: true, credentials: true }; // dev: allow all with credentials
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 if (process.env.LOCAL_UPLOADS === 'true') {
   const localUploadsPath = path.join(__dirname, 'uploads');
@@ -35,6 +46,7 @@ if (process.env.LOCAL_UPLOADS === 'true') {
 app.use('/api/auth', authRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/payments', paymentRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'Teclia Backend is running' });

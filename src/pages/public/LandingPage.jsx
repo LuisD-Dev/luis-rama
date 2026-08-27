@@ -96,18 +96,22 @@ function LandingPage() {
   const sustainHoldRef = useRef(false);
 
   useEffect(() => {
-    if (sessionStorage.getItem('tecliaVisitCounted')) return;
+    try {
+      if (sessionStorage.getItem('tecliaVisitCounted')) return;
+    } catch {}
     statsService.recordVisit()
-      .then(() => sessionStorage.setItem('tecliaVisitCounted', '1'))
+      .then(() => { try { sessionStorage.setItem('tecliaVisitCounted', '1'); } catch {} })
       .catch(() => { });
   }, []);
 
   // Resume checkout after login redirect
   useEffect(() => {
-    const savedPlan = sessionStorage.getItem('checkout_plan');
-    if (savedPlan && !checkoutPlan) {
-      setCheckoutPlan(savedPlan);
-    }
+    try {
+      const savedPlan = sessionStorage.getItem('checkout_plan');
+      if (savedPlan && !checkoutPlan) {
+        setCheckoutPlan(savedPlan);
+      }
+    } catch {}
   }, []);
 
   const selectedScaleNotes = useMemo(() => {
