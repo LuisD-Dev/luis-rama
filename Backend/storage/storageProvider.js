@@ -5,6 +5,7 @@
  * - upload(file, destination): stores a file and returns a persisted relative path.
  * - delete(path): removes a previously stored file.
  * - resolveUrl(path): converts a stored path into a URL that the client can use.
+ * - resolveSignedUrl(path, options): creates a short-lived URL for protected content.
  */
 
 /**
@@ -36,4 +37,15 @@ export const deleteFile = async (pathToDelete) => {
  */
 export const resolveUrl = (pathToResolve) => {
   throw new Error('Storage provider must implement resolveUrl()');
+};
+
+/**
+ * Resolves the storage path to a time-limited client-accessible URL.
+ *
+ * @param {string} pathToResolve - Relative path returned by upload().
+ * @param {{ expiresInSeconds: number, downloadName?: string }} options - Signing options.
+ * @returns {Promise<string>|string} A URL that expires after the requested TTL.
+ */
+export const resolveSignedUrl = (pathToResolve, options) => {
+  throw new Error('Storage provider must implement resolveSignedUrl()');
 };

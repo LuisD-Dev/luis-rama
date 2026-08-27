@@ -6,3 +6,4 @@ uploads/*
 !uploads/.gitkeep
 db/*.tmp
 db/*.bak
+prisma/*.db

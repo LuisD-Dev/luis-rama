@@ -30,6 +30,52 @@ CREATE TABLE IF NOT EXISTS site_stats (
   value INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS payments (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  amount INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'usd',
+  plan_tier TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'created',
+  provider TEXT NOT NULL DEFAULT 'stripe',
+  external_id TEXT,
+  payment_method_id TEXT,
+  stripe_payment_intent_id TEXT UNIQUE,
+  stripe_checkout_session_id TEXT UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  metadata TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS payments_user_id_created_at_idx ON payments(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  plan_tier TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  provider TEXT NOT NULL DEFAULT 'stripe',
+  external_id TEXT NOT NULL,
+  current_period_start TIMESTAMP NOT NULL,
+  current_period_end TIMESTAMP NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (provider, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS payment_events (
+  id SERIAL PRIMARY KEY,
+  payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  processed_at TIMESTAMP,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  stripe_event_id TEXT UNIQUE,
+  outcome TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 INSERT INTO users (email, password_hash, name, role, plan_tier)
 VALUES (
   'austinrmz2007@gmail.com',

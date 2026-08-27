@@ -43,7 +43,7 @@ export const jazzImprovArticle = {
   body: 'A detailed guide on jazz improvisation, including chord progressions, scale choices, and listening to great jazz pianists.',
   url: 'https://example.com/jazz-improv-guide',
   is_free: 0,
-  plan_tier: 'premium',
+  plan_tier: 'basico',
   tags: ['jazz', 'improvisation', 'intermediate']
 };
 

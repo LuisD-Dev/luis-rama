@@ -1,9 +1,8 @@
 import { useState } from 'react';
-import axios from 'axios';
+import api from '../../services/api.js';
 import { useContent } from '../../context/ContentContext.jsx';
-import { BACKEND_BASE_URL } from '../../services/api.js';
 import { CONTENT_PLANS } from '../../utils/plans.js';
-import { getStoredToken } from '../../utils/jwt.js';
+import { UIIcon } from '../common/Icons.jsx';
 
 export const UploadForm = () => {
   const [title, setTitle] = useState('');
@@ -15,8 +14,17 @@ export const UploadForm = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [progress, setProgress] = useState(0);
 
   const { addContent } = useContent();
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragging(false);
+    const dropped = e.dataTransfer.files?.[0];
+    if (dropped) setFile(dropped);
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -28,10 +36,15 @@ export const UploadForm = () => {
       return;
     }
 
+    if (description.trim().length < 10) {
+      setError('La descripción debe tener al menos 10 caracteres');
+      return;
+    }
+
     setLoading(true);
+    setProgress(0);
 
     try {
-      const token = getStoredToken();
       const form = new FormData();
       form.append('title', title);
       form.append('description', description);
@@ -41,9 +54,14 @@ export const UploadForm = () => {
       form.append('plan_tier', planTier);
       form.append('is_free', planTier === 'free' ? '1' : '0');
 
-      const res = await axios.post(`${BACKEND_BASE_URL}/api/content/upload`, form, {
+      const res = await api.post('/content/upload', form, {
         headers: {
-          Authorization: `Bearer ${token}`,
+          'Content-Type': 'multipart/form-data',
+        },
+        onUploadProgress: (evt) => {
+          if (evt.total) {
+            setProgress(Math.round((evt.loaded / evt.total) * 100));
+          }
         },
       });
 
@@ -55,6 +73,7 @@ export const UploadForm = () => {
       setType('video');
       setFile(null);
       setPlanTier('free');
+      setProgress(0);
 
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
@@ -69,7 +88,7 @@ export const UploadForm = () => {
       <h2>Añadir contenido</h2>
       <p className="hint">Sube tu lección y elige para qué plan estará disponible.</p>
 
-      {error && <div className="error-message">{error}</div>}
+      {error && <div key={error} className="error-message animate-shake">{error}</div>}
       {success && <div className="success-message">Contenido agregado correctamente.</div>}
 
       <div className="form-group">
@@ -90,8 +109,10 @@ export const UploadForm = () => {
           id="description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="Describe el contenido brevemente..."
+          placeholder="Describe el contenido (mínimo 10 caracteres)..."
           rows={3}
+          minLength={10}
+          required
         />
       </div>
 
@@ -100,9 +121,8 @@ export const UploadForm = () => {
           <label htmlFor="type">Tipo de Contenido</label>
           <select id="type" value={type} onChange={(e) => setType(e.target.value)}>
             <option value="video">Video</option>
-            <option value="pdf">PDF</option>
-            <option value="audio">Audio</option>
-            <option value="image">Imagen</option>
+            <option value="article">Artículo</option>
+            <option value="quiz">Quiz</option>
           </select>
         </div>
         <div className="form-group">
@@ -129,12 +149,35 @@ export const UploadForm = () => {
       </div>
 
       <div className="form-group">
-        <label htmlFor="file">Archivo (video/pdf/audio/imagen)</label>
-        <input id="file" type="file" onChange={(e) => setFile(e.target.files[0] || null)} accept="video/*,application/pdf,audio/*,image/*" />
+        <label>Archivo (video/pdf/audio/imagen)</label>
+        <label
+          className={`dropzone ${dragging ? 'drag' : ''}`}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+        >
+          <span className="dropzone-icon" aria-hidden="true"><UIIcon name="upload" size={26} /></span>
+          <span className="dropzone-title">Arrastra un archivo aquí</span>
+          <span className="dropzone-hint">o haz clic para seleccionar</span>
+          {file && <span className="dropzone-file"><UIIcon name="paperclip" size={14} /> {file.name}</span>}
+          <input
+            type="file"
+            onChange={(e) => setFile(e.target.files[0] || null)}
+            accept="video/*,application/pdf,audio/*,image/*"
+          />
+        </label>
       </div>
 
+      {loading && progress > 0 && (
+        <div className="upload-progress" aria-label={`Subiendo ${progress}%`}>
+          <span style={{ width: `${progress}%` }} />
+        </div>
+      )}
+
       <button type="submit" disabled={loading} className="button button-primary button-block">
-        {loading ? 'Subiendo...' : 'Añadir contenido'}
+        {loading ? (
+          <span className="btn-loading"><span className="spinner" /> {progress > 0 ? `Subiendo ${progress}%` : 'Subiendo…'}</span>
+        ) : 'Añadir contenido'}
       </button>
     </form>
   );

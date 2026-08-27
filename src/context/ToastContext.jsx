@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState } from 'react';
+import { UIIcon } from '../components/common/Icons.jsx';
 
 const ToastContext = createContext();
 
@@ -28,11 +29,23 @@ export const ToastProvider = ({ children }) => {
       <div className="toast-container" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.type}`}>
+            <span className="toast-icon" aria-hidden="true">
+              {t.type === 'success' ? (
+                <UIIcon name="check" size={16} />
+              ) : t.type === 'error' ? (
+                <UIIcon name="warning" size={16} />
+              ) : (
+                <UIIcon name="eye" size={16} />
+              )}
+            </span>
             <span className="toast-message">{t.message}</span>
             {t.type === 'error' && (
               <button className="toast-dismiss" onClick={() => removeToast(t.id)} aria-label="Cerrar">
-                ✕
+                <UIIcon name="close" size={14} />
               </button>
+            )}
+            {t.type === 'success' && t.duration > 0 && (
+              <span className="toast-progress" style={{ animationDuration: `${t.duration}ms` }} />
             )}
           </div>
         ))}

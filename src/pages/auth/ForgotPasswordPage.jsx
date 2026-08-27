@@ -97,7 +97,7 @@ export const ForgotPasswordPage = () => {
               : 'Usaremos el correo que ingresaste en el login para enviarte un PIN de recuperación.'}
           </p>
 
-          {error && <div className="error-message">{error}</div>}
+          {error && <div key={error} className="error-message animate-shake">{error}</div>}
           {message && <div className="success-message">{message}</div>}
 
           {verifying ? (

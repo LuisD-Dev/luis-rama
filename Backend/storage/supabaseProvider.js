@@ -102,6 +102,39 @@ const supabaseProvider = {
     }
     return data.publicUrl;
   },
+
+  /**
+   * Creates a short-lived URL for a file in the configured Supabase bucket.
+   *
+   * @param {string} storagePath - Relative storage path previously returned by upload().
+   * @param {{ expiresInSeconds: number, downloadName?: string }} options - Signing options.
+   * @returns {Promise<string>} Signed Supabase Storage URL.
+   */
+  async resolveSignedUrl(storagePath, { expiresInSeconds, downloadName } = {}) {
+    const { bucket } = getSupabaseConfig();
+    const client = getClient();
+    const parsedExpiry = Number(expiresInSeconds);
+
+    if (!Number.isInteger(parsedExpiry) || parsedExpiry <= 0) {
+      throw new Error('expiresInSeconds must be a positive integer');
+    }
+
+    const options = downloadName ? { download: downloadName } : undefined;
+    const bucketClient = client.storage.from(bucket);
+    const { data, error } = options
+      ? await bucketClient.createSignedUrl(storagePath, parsedExpiry, options)
+      : await bucketClient.createSignedUrl(storagePath, parsedExpiry);
+
+    if (error) {
+      throw new Error(`Supabase storage createSignedUrl failed: ${error.message}`);
+    }
+
+    if (!data?.signedUrl) {
+      throw new Error('Supabase storage createSignedUrl returned no URL');
+    }
+
+    return data.signedUrl;
+  },
 };
 
 export default supabaseProvider;
