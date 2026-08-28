@@ -14,6 +14,7 @@ Scripts
 - `npm run test` — run tests once
 - `npm run test:watch` — run tests in watch mode
 - `npm run test:coverage` — run with coverage
+- `npm run test:payments:concurrency` — run deterministic payment interleavings (under the CI time budget)
 
 Structure
 - `tests/` contains `auth.test.js`, `content.test.js`, `stats.test.js`.
@@ -25,3 +26,13 @@ Notes
 - Tests are built to be isolated and remove created users/content between tests.
 
 See also: [PRISMA_MIGRATION_GUIDE.md](../PRISMA_MIGRATION_GUIDE.md)
+
+## How to add an invariant
+
+Add the assertion to `tests/concurrency/harness.js` so it is checked after every
+schedule, then add a focused test to `tests/concurrency/invariants.test.js`.
+Keep the invariant about observable payment state, and include a test-only
+mutation that would violate it when the invariant is safety-critical. A failing
+run prints the seed and compact barrier schedule; replay it with the same seed
+when extending the harness, for example with
+`npm run test:payments:concurrency -- --seed=12345`.
