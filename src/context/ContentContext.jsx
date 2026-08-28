@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { BACKEND_BASE_URL, contentService } from '../services/api.js';
+import { useAuth } from './AuthContext.jsx';
 
 const ContentContext = createContext();
 
@@ -8,6 +9,16 @@ export const ContentProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const refreshedMediaUrls = useRef(new Set());
+  const { entitlementEpoch } = useAuth();
+  const lastEpochRef = useRef(entitlementEpoch);
+
+  useEffect(() => {
+    if (entitlementEpoch !== lastEpochRef.current && lastEpochRef.current !== null) {
+      setContent([]);
+      loadContent();
+    }
+    lastEpochRef.current = entitlementEpoch;
+  }, [entitlementEpoch]);
 
   const loadContent = useCallback(async () => {
     try {

@@ -7,6 +7,7 @@ export const formatUser = (user) => ({
   role: user.role,
   plan_tier: user.planTier ?? null,
   avatar_url: user.avatarUrl ?? null,
+  entitlement_epoch: user.entitlementEpoch ?? null,
 });
 
 export const formatUserWithCreatedAt = (user) => ({

@@ -9,6 +9,7 @@ import {
   applyTransition,
   createPaymentInPendingState,
 } from './paymentStateMachine.js';
+import { setUserPlanTier } from './entitlementService.js';
 
 const STRIPE_API_BASE = 'api.stripe.com';
 
@@ -548,13 +549,16 @@ const convergePaymentToSucceeded = async (tx, payment, meta) => {
 };
 
 const activateCompletedPaymentEntitlement = (tx, { payment }) =>
-  tx.user.update({
-    where: { id: payment.userId },
-    data: {
+  setUserPlanTier(
+    {
+      userId: payment.userId,
       planTier: payment.planTier,
-      role: 'premium',
+      extraData: { role: 'premium' },
+      reason: 'payment_completed',
+      actor: 'stripe',
     },
-  });
+    tx
+  );
 
 /**
  * Mark a payment completed and activate the user's subscription/plan in one transaction.
@@ -721,7 +725,16 @@ const writeAuditLog = (
   });
 
 const applyUserEntitlements = (tx, { userId, planTier, role }) =>
-  tx.user.update({ where: { id: userId }, data: { planTier, role } });
+  setUserPlanTier(
+    {
+      userId,
+      planTier,
+      extraData: { role },
+      reason: 'entitlement_apply',
+      actor: 'system',
+    },
+    tx
+  );
 
 const findLocalSubscriptionByExternalId = (tx, externalId) =>
   tx.subscription.findUnique({
@@ -1534,13 +1547,16 @@ const activateSimulatedPaymentEntitlement = async (tx, { payment }) => {
   const currentUser = await tx.user.findUnique({ where: { id: payment.userId } });
   if (!currentUser) throw new Error('user_not_found');
 
-  return tx.user.update({
-    where: { id: payment.userId },
-    data: {
+  return setUserPlanTier(
+    {
+      userId: payment.userId,
       planTier: payment.planTier,
-      role: currentUser.role === 'admin' ? 'admin' : 'premium',
+      extraData: { role: currentUser.role === 'admin' ? 'admin' : 'premium' },
+      reason: 'payment_simulated',
+      actor: 'simulator',
     },
-  });
+    tx
+  );
 };
 
 const simulatedConfirmationTarget = (status) => {

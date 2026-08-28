@@ -5,6 +5,7 @@ import prisma from "../utils/prismaClient.js";
 import { validatePassword } from "../utils/password.js";
 import { listNonAdminUsers } from "../utils/dbUsers.js";
 import { formatUser, formatUserWithCreatedAt } from "../utils/serializers.js";
+import { setUserPlanTier } from "../services/entitlementService.js";
 import storage from "../storage/index.js";
 import {
   REFRESH_TOKEN_EXPIRED,
@@ -510,9 +511,12 @@ export const updateStudentPlan = async (req, res) => {
         .json({ error: "No se puede modificar un administrador" });
     }
 
-    const student = await prisma.user.update({
-      where: { id: userId },
-      data: { planTier: normalizedPlan, role: newRole },
+    const student = await setUserPlanTier({
+      userId,
+      planTier: normalizedPlan,
+      extraData: { role: newRole },
+      reason: 'admin_assignment',
+      actor: req.user?.id ?? 'admin',
     });
 
     res.json({
