@@ -386,6 +386,7 @@ export async function createPaymentIntent(
         stripePaymentIntentId,
         stripeCheckoutSessionId,
         idempotencyKey,
+        ipHash,
         metadata: serializeMetadata(metadata),
       },
       paymentInitializationMeta({

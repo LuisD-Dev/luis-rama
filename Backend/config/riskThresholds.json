@@ -1,0 +1,7 @@
+{
+  "attemptsUserHour": 8,
+  "distinctPMsUserDay": 4,
+  "failsIpHour": 12,
+  "accountAgeMinutes": 30,
+  "_comment": "Thresholds are also configurable via env: RISK_THRESHOLD_ATTEMPTS_USER_HOUR etc. JSON file is optional. Loaded if RISK_CONFIG_PATH is set."
+}

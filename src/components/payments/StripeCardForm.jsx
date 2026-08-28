@@ -40,7 +40,19 @@ const stripeErrorMessages = {
   invalid_cvc: 'El código de seguridad no es válido.',
 };
 
+const getRiskErrorMessage = (error) => {
+  const status = error?.status || error?.response?.status;
+  const data = error?.response?.data || error;
+  const code = data?.code;
+  if ((status === 423 || status === 403) && (code === 'RISK_CHALLENGE' || code === 'RISK_BLOCK' || data?.error === 'risk_challenge' || data?.error === 'risk_block')) {
+    return { isRisk: true, code, message: getRiskMessage(code), status, decision: data?.decision, reasons: data?.reasons };
+  }
+  return null;
+};
+
 const getStripeErrorMessage = (error) => {
+  const risk = getRiskErrorMessage(error);
+  if (risk) return risk.message;
   const code = error?.code || error?.decline_code || error?.response?.data?.code;
   return stripeErrorMessages[code]
     || 'No pudimos procesar tu método de pago. Revisa los datos e inténtalo de nuevo.';
@@ -107,6 +119,19 @@ function StripeCardFormContent({ submitLabel, successMessage, onSuccess }) {
         sessionStorage.removeItem('checkout_idempotency_key');
       }
     } catch (error) {
+      const risk = getRiskErrorMessage(error);
+      if (risk?.code === 'RISK_CHALLENGE' || error?.response?.data?.code === 'RISK_CHALLENGE') {
+        setStatus({ type: 'error', message: `${risk?.message || getRiskMessage('RISK_CHALLENGE')} — Por favor inicia sesión de nuevo.` });
+        // challenge: re-auth required using existing session -> invoke logout to re-login
+        setTimeout(() => {
+          try { invokeLogout({ reason: 'risk_challenge', showToast: true, redirectTo: '/auth/login' }); } catch {}
+        }, 1200);
+        return;
+      }
+      if (risk?.code === 'RISK_BLOCK') {
+        setStatus({ type: 'error', message: risk.message });
+        return;
+      }
       setStatus({ type: 'error', message: getStripeErrorMessage(error) });
     } finally {
       setIsProcessing(false);
