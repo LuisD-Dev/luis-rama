@@ -9,6 +9,7 @@ dist/
 Backend/node_modules/
 Backend/.env
 Backend/db/*.db
+Backend/prisma/data/
 Backend/uploads/
 Backend/db/*.tmp
 Backend/db/*.bak

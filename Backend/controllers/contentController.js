@@ -42,11 +42,11 @@ export const getContentSignedUrlTtlSeconds = () => {
 const getUserAccess = async (userId) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { role: true, planTier: true },
+    select: { role: true, planTier: true, entitlementEpoch: true },
   });
 
   if (!user) return null;
-  return { role: user.role, plan_tier: user.planTier };
+  return { role: user.role, plan_tier: user.planTier, entitlementEpoch: user.entitlementEpoch };
 };
 
 const resolveContentUrls = async (items) => {
@@ -109,7 +109,7 @@ export const getContent = async (req, res) => {
     let content = filterContentForUser(allContent, access);
     content = await resolveContentUrls(content);
 
-    res.json({ content });
+    res.json({ content, meta: { entitlementEpoch: access?.entitlementEpoch ?? null } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

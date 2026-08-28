@@ -9,6 +9,7 @@ import { useAuth } from '../../hooks/useAuth.js';
 import StripeCardForm from './StripeCardForm.jsx';
 import { Confetti } from '../common/Confetti.jsx';
 import { createPaymentIntent } from '../../services/api.js';
+import { getRiskMessage } from '../../i18n/messages.js';
 
 const PAYMENTS_ENABLED = import.meta.env.VITE_PAYMENTS_ENABLED === 'true';
 
@@ -184,7 +185,22 @@ export const CheckoutFlow = ({ initialPlan, onComplete, renderPaymentForm }) => 
         setIntentError('No pudimos completar el pago. Inténtalo nuevamente.');
       }
     } catch (err) {
-      if (err.response?.data?.error === 'invalid_plan') {
+      const status = err.response?.status;
+      const data = err.response?.data || {};
+      if (data.code === 'RISK_CHALLENGE' || data.code === 'RISK_BLOCK' || status === 423 || (status === 403 && data.error?.startsWith('risk_')) || status === 503 && data.code === 'RISK_DB_ERROR') {
+        if (data.code === 'RISK_CHALLENGE' || status === 423) {
+          setIntentError(getRiskMessage('RISK_CHALLENGE'));
+        } else if (data.code === 'RISK_BLOCK') {
+          setIntentError(getRiskMessage('RISK_BLOCK'));
+        } else if (data.code === 'RISK_DB_ERROR') {
+          setIntentError('Servicio de riesgo no disponible. Intenta nuevamente en unos segundos.');
+        } else {
+          setIntentError(getRiskMessage(data.code || 'RISK_BLOCK'));
+        }
+        if (status === 423 || data.code === 'RISK_CHALLENGE') {
+          try { const { invokeLogout } = await import('../../utils/authSession.js'); invokeLogout({ reason: 'risk_challenge', showToast: true, redirectTo: '/auth/login' }); } catch {}
+        }
+      } else if (err.response?.data?.error === 'invalid_plan') {
         setIntentError('El plan seleccionado no es válido. Intenta con otro.');
       } else if (err.message?.includes('Network Error') || err.message?.includes('Failed to fetch')) {
         setIntentError('No se pudo conectar con el servidor. Verifica tu conexión e intenta de nuevo.');
