@@ -3,6 +3,7 @@ import { canAccessPlan, normalizePlanTier, PLAN_TIERS } from '../utils/plans.js'
 import { formatContent } from '../utils/serializers.js';
 import { buildFreeContentWhere, getContentPlanTier, isContentFree } from '../utils/contentAccess.js';
 import storage from '../storage/index.js';
+import { recordAdminAction } from '../services/adminAuditService.js';
 
 const DEFAULT_CONTENT_SIGNED_URL_TTL_SECONDS = 900;
 const MIN_CONTENT_SIGNED_URL_TTL_SECONDS = 300;
@@ -291,7 +292,20 @@ export const deleteContent = async (req, res) => {
       }
     }
 
-    await prisma.content.delete({ where: { id } });
+    await prisma.$transaction(async (db) => {
+      await db.content.delete({ where: { id } });
+      await recordAdminAction({
+        db,
+        actorUserId: req.user.id,
+        action: 'content.delete',
+        targetType: 'content',
+        targetId: id,
+        requestId: req.requestId,
+        ip: req.ip,
+        before: { id: found.id, title: found.title, type: found.type, planTier: found.planTier },
+        after: null,
+      });
+    });
 
     res.json({ message: 'Content deleted' });
   } catch (err) {

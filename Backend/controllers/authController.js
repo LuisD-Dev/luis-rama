@@ -7,6 +7,7 @@ import { listNonAdminUsers } from "../utils/dbUsers.js";
 import { formatUser, formatUserWithCreatedAt } from "../utils/serializers.js";
 import { setUserPlanTier } from "../services/entitlementService.js";
 import storage from "../storage/index.js";
+import { recordAdminAction } from "../services/adminAuditService.js";
 import {
   REFRESH_TOKEN_EXPIRED,
   REFRESH_TOKEN_EXPIRED_MESSAGE,
@@ -511,12 +512,29 @@ export const updateStudentPlan = async (req, res) => {
         .json({ error: "No se puede modificar un administrador" });
     }
 
-    const student = await setUserPlanTier({
-      userId,
-      planTier: normalizedPlan,
-      extraData: { role: newRole },
-      reason: 'admin_assignment',
-      actor: req.user?.id ?? 'admin',
+    const student = await prisma.$transaction(async (db) => {
+      const updated = await setUserPlanTier(
+        {
+          userId,
+          planTier: normalizedPlan,
+          extraData: { role: newRole },
+          reason: "admin_assignment",
+          actor: req.user?.id ?? "admin",
+        },
+        db
+      );
+      await recordAdminAction({
+        db,
+        actorUserId: req.user.id,
+        action: normalizedPlan ? "plan.assign" : "plan.clear",
+        targetType: "student",
+        targetId: userId,
+        requestId: req.requestId,
+        ip: req.ip,
+        before: { id: found.id, planTier: found.planTier, role: found.role },
+        after: { id: updated.id, planTier: updated.planTier, role: updated.role },
+      });
+      return updated;
     });
 
     res.json({
@@ -557,10 +575,57 @@ export const deleteStudent = async (req, res) => {
       await removeFileFromStorageOrLocal(item.url);
     }
 
-    await prisma.content.deleteMany({ where: { uploadedBy: userId } });
-    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$transaction(async (db) => {
+      await db.content.deleteMany({ where: { uploadedBy: userId } });
+      await db.user.delete({ where: { id: userId } });
+      await recordAdminAction({
+        db,
+        actorUserId: req.user.id,
+        action: "student.delete",
+        targetType: "student",
+        targetId: userId,
+        requestId: req.requestId,
+        ip: req.ip,
+        before: { id: found.id, role: found.role, planTier: found.planTier, status: found.status },
+        after: null,
+      });
+    });
 
     res.json({ message: "Cuenta eliminada correctamente" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const updateStudentStatus = async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    const { status } = req.body;
+    const validStatuses = ["active", "inactive", "suspended"];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: "Estado no válido. Use: active, inactive, suspended" });
+    }
+
+    const found = await prisma.user.findUnique({ where: { id: userId } });
+    if (!found) return res.status(404).json({ error: "Estudiante no encontrado" });
+    if (found.role === "admin") return res.status(400).json({ error: "No se puede modificar un administrador" });
+
+    const student = await prisma.$transaction(async (db) => {
+      const updated = await db.user.update({ where: { id: userId }, data: { status } });
+      await recordAdminAction({
+        db,
+        actorUserId: req.user.id,
+        action: status === "suspended" ? "student.suspend" : found.status === "suspended" ? "student.unsuspend" : "student.status",
+        targetType: "student",
+        targetId: userId,
+        requestId: req.requestId,
+        ip: req.ip,
+        before: { id: found.id, status: found.status || "active" },
+        after: { id: updated.id, status: updated.status },
+      });
+      return updated;
+    });
+    res.json({ message: `Estado actualizado a ${status}`, student: formatUserWithCreatedAt(student) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

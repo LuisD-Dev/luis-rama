@@ -13,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import mediaRoutes from './routes/media.js';
 import adminRoutes from './routes/admin.js';
+import { requestId } from './middleware/requestId.js';
 import paymentsRoutes from './routes/payments.js';
 import webhooksRoutes from './routes/webhooks.js';
 
@@ -24,6 +25,7 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 app.use(globalLimiter);
+app.use(requestId);
 
 // Ensure a JWT secret exists for tests/development if not provided
 if (!process.env.JWT_SECRET) {

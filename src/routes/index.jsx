@@ -10,6 +10,7 @@ import AdminDashboardPage from '../pages/admin/AdminDashboardPage.jsx';
 import AdminUploadPage from '../pages/admin/AdminUploadPage.jsx';
 import AdminContentPage from '../pages/admin/AdminContentPage.jsx';
 import AdminStudentsPage from '../pages/admin/AdminStudentsPage.jsx';
+import AdminAuditPage from '../pages/admin/AdminAuditPage.jsx';
 import FreeResources from '../pages/public/FreeResources.jsx';
 import ProfilePage from '../pages/dashboard/ProfilePage.jsx';
 import RecursosPage from '../pages/dashboard/RecursosPage.jsx';
@@ -126,6 +127,10 @@ export const AppRoutes = () => (
           </AdminRoute>
         </ProtectedRoute>
       }
+    />
+    <Route
+      path="/admin/audit"
+      element={<ProtectedRoute><AdminRoute><AdminAuditPage /></AdminRoute></ProtectedRoute>}
     />
 
     <Route path="*" element={<NotFoundPage />} />

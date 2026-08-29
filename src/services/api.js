@@ -106,6 +106,8 @@ export const authService = {
 export const adminService = {
   getDashboardStats: () =>
     api.get('/admin/stats'),
+  getAuditEvents: (params = {}) =>
+    api.get('/admin/audit', { params }),
   deleteContent: (contentId) =>
     api.delete(`/content/${contentId}`),
 };
