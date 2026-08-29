@@ -40,7 +40,6 @@ app.use('/api/webhooks', stripeWebhookRawBody, webhooksRoutes);
 app.post('/api/payments/webhook', stripeWebhookRawBody, stripeWebhookHandler);
 
 app.use(globalLimiter);
-app.use(requestId);
 
 // Ensure a JWT secret exists for tests/development if not provided
 if (!process.env.JWT_SECRET) {
