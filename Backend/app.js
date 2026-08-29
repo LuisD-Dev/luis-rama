@@ -9,6 +9,7 @@ import authRoutes from './routes/auth.js';
 import contentRoutes from './routes/content.js';
 import statsRoutes from './routes/stats.js';
 import adminRoutes from './routes/admin.js';
+import { requestId } from './middleware/requestId.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +19,7 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(globalLimiter);
+app.use(requestId);
 
 // Ensure a JWT secret exists for tests/development if not provided
 if (!process.env.JWT_SECRET) {

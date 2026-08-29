@@ -50,6 +50,28 @@ const ensurePaymentsTable = async () => {
   }
 };
 
+const ensureAuditTable = async () => {
+  const dbUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || '';
+  const isPostgres = dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://');
+  const timestampType = isPostgres ? 'TIMESTAMP' : 'DATETIME';
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS admin_audit_events (
+      id TEXT PRIMARY KEY,
+      actor_user_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      request_id TEXT,
+      ip_hash TEXT,
+      before_json TEXT,
+      after_json TEXT,
+      prev_hash TEXT NOT NULL,
+      entry_hash TEXT NOT NULL UNIQUE,
+      created_at ${timestampType} NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+};
+
 export const setupTestDb = () => {
   beforeAll(async () => {
     process.env.NODE_ENV = 'test';
@@ -62,6 +84,7 @@ export const setupTestDb = () => {
 
     await connectDb();
     await ensurePaymentsTable();
+    await ensureAuditTable();
     dbReady = true;
   });
 
@@ -70,6 +93,7 @@ export const setupTestDb = () => {
 
     try {
       await prisma.payment.deleteMany();
+      await prisma.adminAuditEvent.deleteMany();
       await prisma.content.deleteMany();
       await prisma.siteStat.deleteMany();
       await prisma.user.deleteMany({

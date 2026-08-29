@@ -15,6 +15,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "prisma db seed",
     "prisma:studio": "prisma studio",
+    "audit:verify": "node scripts/verifyAudit.js",
     "postinstall": "prisma generate"
   },
   "keywords": [

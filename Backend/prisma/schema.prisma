@@ -13,6 +13,7 @@ model User {
   passwordHash      String    @map("password_hash")
   name              String
   role              String?   @default("student")
+  status            String?   @default("active")
   avatarUrl         String?   @map("avatar_url")
   resetPin          String?   @map("reset_pin")
   resetPinExpiresAt DateTime? @map("reset_pin_expires_at")
@@ -60,4 +61,23 @@ model Payment {
   @@index([createdAt])
   @@index([planTier])
   @@map("payments")
+}
+
+model AdminAuditEvent {
+  id          String   @id @default(cuid())
+  actorUserId Int      @map("actor_user_id")
+  action      String
+  targetType  String   @map("target_type")
+  targetId    String   @map("target_id")
+  requestId   String?  @map("request_id")
+  ipHash      String?  @map("ip_hash")
+  beforeJson  String?  @map("before_json")
+  afterJson   String?  @map("after_json")
+  prevHash    String   @map("prev_hash")
+  entryHash   String   @unique @map("entry_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId])
+  @@map("admin_audit_events")
 }
