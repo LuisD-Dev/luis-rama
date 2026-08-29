@@ -16,6 +16,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "prisma db seed",
     "prisma:studio": "prisma studio",
+    "audit:verify": "node scripts/verifyAudit.js",
     "migrate:plan-tiers": "node scripts/migrations/migrate-premium-plan-tier.js",
     "migrate:plan-tiers:dry-run": "node scripts/migrations/migrate-premium-plan-tier.js --dry-run",
     "payment-status:migrate:dry-run": "node scripts/migratePaymentStatuses.js --dry-run",

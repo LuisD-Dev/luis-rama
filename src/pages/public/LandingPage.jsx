@@ -110,14 +110,22 @@ function LandingPage() {
   const sustainHoldRef = useRef(false);
 
   useEffect(() => {
-    if (sessionStorage.getItem('tecliaVisitCounted')) return;
+    try {
+      if (sessionStorage.getItem('tecliaVisitCounted')) return;
+    } catch {}
     statsService.recordVisit()
-      .then(() => sessionStorage.setItem('tecliaVisitCounted', '1'))
+      .then(() => { try { sessionStorage.setItem('tecliaVisitCounted', '1'); } catch {} })
       .catch(() => { });
   }, []);
 
   // Resume checkout only after login redirect, not on every visit
   useEffect(() => {
+    try {
+      const savedPlan = sessionStorage.getItem('checkout_plan');
+      if (savedPlan && !checkoutPlan) {
+        setCheckoutPlan(savedPlan);
+      }
+    } catch {}
     if (sessionStorage.getItem('checkout_resume') !== '1') return;
     sessionStorage.removeItem('checkout_resume');
     const savedPlan = sessionStorage.getItem('checkout_plan');

@@ -28,6 +28,7 @@ const stripeWebhookRawBody = express.raw({
 });
 
 app.set('trust proxy', 1);
+
 app.use(helmet({
   contentSecurityPolicy: false, // allow vite dev; enable strict CSP in prod if needed
   crossOriginEmbedderPolicy: false,
@@ -52,7 +53,9 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 if (process.env.LOCAL_UPLOADS?.toLowerCase() === 'true') {
   const localUploadsPath = getUploadsPath();
-  app.use('/uploads/content', (_req, res) => res.status(404).json({ error: 'Media not found' }));
+  app.use('/uploads/content', (_req, res) =>
+    res.status(404).json({ error: 'Media not found' })
+  );
   app.use('/uploads', express.static(localUploadsPath));
 }
 

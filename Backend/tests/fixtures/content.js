@@ -102,11 +102,14 @@ export const intermediateSkillsQuiz = {
 /**
  * Export all fixtures as an object for convenience
  */
+export const validContent = pianoBasicsVideo;
+
 export default {
   pianoBasicsVideo,
   advancedPianoVideo,
   musicTheoryArticle,
   jazzImprovArticle,
   theoryBasicsQuiz,
-  intermediateSkillsQuiz
+  intermediateSkillsQuiz,
+  validContent
 };
