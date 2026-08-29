@@ -14,6 +14,7 @@ import {
   updateStudentPlan,
   deleteStudent,
   listStudents,
+  updateStudentStatus,
 } from '../controllers/authController.js';
 import { verifyToken, adminOnly } from '../middleware/auth.js';
 import validate from '../middleware/validate.js';
@@ -47,5 +48,6 @@ router.post('/verify-recovery-email', validate(authSchemas.verifyRecoveryEmail),
 router.get('/students', verifyToken, adminOnly, listStudents);
 router.patch('/students/:id/plan', verifyToken, adminOnly, updateStudentPlan);
 router.delete('/students/:id', verifyToken, adminOnly, deleteStudent);
+router.patch('/users/:id/status', verifyToken, adminOnly, updateStudentStatus);
 
 export default router;

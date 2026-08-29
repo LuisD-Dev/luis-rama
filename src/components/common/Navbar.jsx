@@ -42,6 +42,7 @@ export const Navbar = () => {
                     <Link to="/admin" className={`button button-ghost ${isAdminPath('/admin') ? 'nav-active' : ''}`} onClick={closeMobile}>Mi escuela</Link>
                     <Link to="/admin/students" className={`button button-ghost ${isAdminPath('/admin/students') ? 'nav-active' : ''}`} onClick={closeMobile}>Estudiantes</Link>
                     <Link to="/admin/upload" className={`button button-ghost ${['/admin/upload', '/admin/content'].includes(location.pathname) ? 'nav-active' : ''}`} onClick={closeMobile}>Gestionar contenido</Link>
+                    <Link to="/admin/audit" className={`button button-ghost ${location.pathname === '/admin/audit' ? 'nav-active' : ''}`} onClick={closeMobile}>Auditoría</Link>
                   </>
                 )}
               </div>
