@@ -28,14 +28,19 @@ const stripeWebhookRawBody = express.raw({
 });
 
 app.set('trust proxy', 1);
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // allow vite dev; enable strict CSP in prod if needed
+  crossOriginEmbedderPolicy: false,
+}));
 
 // Stripe authenticates these requests cryptographically. Mount both raw-body
 // paths before the generic IP limiter so legitimate event bursts cannot receive
 // a pre-verification 429 instead of the documented webhook status contract.
 app.use('/api/webhooks', stripeWebhookRawBody, webhooksRoutes);
 app.post('/api/payments/webhook', stripeWebhookRawBody, stripeWebhookHandler);
+
 app.use(globalLimiter);
+app.use(requestId);
 
 // Ensure a JWT secret exists for tests/development if not provided
 if (!process.env.JWT_SECRET) {
