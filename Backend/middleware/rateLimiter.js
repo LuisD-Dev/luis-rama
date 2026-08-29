@@ -29,3 +29,8 @@ export const authLimiter = createLimiter({
   windowMs: 15 * 60 * 1000,
   max: 10,
 });
+
+export const paymentLimiter = createLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+});
