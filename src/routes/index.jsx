@@ -14,28 +14,36 @@ import AdminAuditPage from '../pages/admin/AdminAuditPage.jsx';
 import FreeResources from '../pages/public/FreeResources.jsx';
 import ProfilePage from '../pages/dashboard/ProfilePage.jsx';
 import RecursosPage from '../pages/dashboard/RecursosPage.jsx';
+import DashboardPage from '../pages/dashboard/DashboardPage.jsx';
 
 const Dashboard = () => {
   const [searchParams] = useSearchParams();
   const reason = searchParams.get('reason');
 
   return (
-    <div className="page-shell">
+    <>
       {reason === 'forbidden' && (
-        <div className="error-message">
-          No tienes permisos para acceder a esa sección.
+        <div className="dashboard-layout" style={{ paddingBottom: 0 }}>
+          <div className="error-message animate-shake">
+            No tienes permisos para acceder a esa sección.
+          </div>
         </div>
       )}
-      <h1>Dashboard</h1>
-      <p>Bienvenido al dashboard. Próximamente: galería de contenido.</p>
-    </div>
+      <DashboardPage />
+    </>
   );
 };
 
 const NotFoundPage = () => (
   <div className="page-shell">
-    <h1>404 - Página no encontrada</h1>
-    <a href="/" className="button button-primary">Volver a inicio</a>
+    <div className="notfound">
+      <div className="notfound-inner">
+        <div className="notfound-code">404</div>
+        <h1>Esta página se perdió entre las teclas.</h1>
+        <p>La página que buscas no existe o fue movida.</p>
+        <a href="/" className="button button-primary">Volver al inicio</a>
+      </div>
+    </div>
   </div>
 );
 

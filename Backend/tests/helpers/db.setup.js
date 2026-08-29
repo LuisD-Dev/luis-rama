@@ -16,7 +16,7 @@ const ensurePaymentsTable = async () => {
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         plan_tier TEXT NOT NULL,
         amount REAL NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
+        status TEXT NOT NULL DEFAULT 'created',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -36,7 +36,7 @@ const ensurePaymentsTable = async () => {
       user_id INTEGER NOT NULL,
       plan_tier TEXT NOT NULL,
       amount REAL NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
+      status TEXT NOT NULL DEFAULT 'created',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -92,6 +92,9 @@ export const setupTestDb = () => {
     if (!dbReady) return;
 
     try {
+      await prisma.riskDecision.deleteMany().catch(()=>{});
+      await prisma.paymentEvent.deleteMany();
+      await prisma.subscription.deleteMany();
       await prisma.payment.deleteMany();
       await prisma.adminAuditEvent.deleteMany();
       await prisma.content.deleteMany();

@@ -10,7 +10,22 @@ import { useInactivityTimer } from './hooks/useInactivityTimer.js';
 import { AppRoutes } from './routes/index.jsx';
 import { useAuth } from './hooks/useAuth.js';
 
-const AppShellContent = () => {
+const AppProviders = ({ children }) => {
+  const { toast, showSessionExpiredToast, dismissToast } = useSessionToast();
+  return (
+    <ErrorBoundary>
+      <AuthProvider onSessionExpiredToast={showSessionExpiredToast}>
+        <ContentProvider>
+          <ToastProvider>
+            {children({ toast, dismissToast })}
+          </ToastProvider>
+        </ContentProvider>
+      </AuthProvider>
+    </ErrorBoundary>
+  );
+};
+
+const AppContent = ({ toast, dismissToast }) => {
   const { user, logout } = useAuth();
 
   const handleTimeout = () => {
@@ -21,6 +36,12 @@ const AppShellContent = () => {
 
   return (
     <>
+      <Navbar />
+      <SessionToast
+        message={toast.message}
+        visible={toast.visible}
+        onDismiss={dismissToast}
+      />
       <AppRoutes />
       {showWarning && (
         <InactivityModal
@@ -32,32 +53,12 @@ const AppShellContent = () => {
   );
 };
 
-const AppShell = () => {
-  const { toast, showSessionExpiredToast, dismissToast } = useSessionToast();
-
-  return (
-    <ErrorBoundary>
-      <AuthProvider onSessionExpiredToast={showSessionExpiredToast}>
-        <ContentProvider>
-          <ToastProvider>
-            <Navbar />
-            <SessionToast
-              message={toast.message}
-              visible={toast.visible}
-              onDismiss={dismissToast}
-            />
-            <AppShellContent />
-          </ToastProvider>
-        </ContentProvider>
-      </AuthProvider>
-    </ErrorBoundary>
-  );
-};
-
 function App() {
   return (
     <Router>
-      <AppShell />
+      <AppProviders>
+        {({ toast, dismissToast }) => <AppContent toast={toast} dismissToast={dismissToast} />}
+      </AppProviders>
     </Router>
   );
 }

@@ -7,7 +7,7 @@ export const Logo = ({ size = 56, showTagline = true }) => (
       <div className="brand-title-row">
         <p className="brand-name">Teclia</p>
       </div>
-      {showTagline && <p className="brand-tag">Piano learning, refined.</p>}
+      {showTagline && <p className="brand-tag">Academia de piano online</p>}
     </div>
   </div>
 );

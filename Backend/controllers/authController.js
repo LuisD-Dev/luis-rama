@@ -5,6 +5,7 @@ import prisma from "../utils/prismaClient.js";
 import { validatePassword } from "../utils/password.js";
 import { listNonAdminUsers } from "../utils/dbUsers.js";
 import { formatUser, formatUserWithCreatedAt } from "../utils/serializers.js";
+import { setUserPlanTier } from "../services/entitlementService.js";
 import storage from "../storage/index.js";
 import { recordAdminAction } from "../services/adminAuditService.js";
 import {
@@ -55,14 +56,18 @@ const removeFileFromStorageOrLocal = async (fileUrl) => {
   }
 };
 
-const generateToken = (userId, role) => {
-  return jwt.sign({ id: userId, role }, process.env.JWT_SECRET, {
+const generateToken = (userId, role, planTier = null) => {
+  const payload = { id: userId, role };
+  if (planTier) payload.planTier = planTier;
+  return jwt.sign(payload, process.env.JWT_SECRET, {
     expiresIn: "24h",
   });
 };
 
-const generateRefreshToken = (userId, role) => {
-  return jwt.sign({ id: userId, role }, process.env.JWT_SECRET, {
+const generateRefreshToken = (userId, role, planTier = null) => {
+  const payload = { id: userId, role };
+  if (planTier) payload.planTier = planTier;
+  return jwt.sign(payload, process.env.JWT_SECRET, {
     expiresIn: "7d",
   });
 };
@@ -136,8 +141,8 @@ export const signup = async (req, res) => {
       },
     });
 
-    const token = generateToken(user.id, "student");
-    const refreshToken = generateRefreshToken(user.id, "student");
+    const token = generateToken(user.id, user.role, user.planTier);
+    const refreshToken = generateRefreshToken(user.id, user.role, user.planTier);
     
     res.status(201).json({
       message: "User created successfully",
@@ -177,8 +182,8 @@ export const login = async (req, res) => {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    const token = generateToken(user.id, user.role);
-    const refreshToken = generateRefreshToken(user.id, user.role);
+    const token = generateToken(user.id, user.role, user.planTier);
+    const refreshToken = generateRefreshToken(user.id, user.role, user.planTier);
     
     res.status(200).json({
       message: "Login successful",
@@ -417,8 +422,8 @@ export const refresh = async (req, res) => {
       return res.status(401).json({ error: USER_NOT_FOUND_MESSAGE, code: USER_NOT_FOUND });
     }
 
-    const token = generateToken(user.id, user.role);
-    const newRefreshToken = generateRefreshToken(user.id, user.role);
+    const token = generateToken(user.id, user.role, user.planTier);
+    const newRefreshToken = generateRefreshToken(user.id, user.role, user.planTier);
     
     res.status(200).json({ 
       message: "Token refreshed successfully",
@@ -508,10 +513,16 @@ export const updateStudentPlan = async (req, res) => {
     }
 
     const student = await prisma.$transaction(async (db) => {
-      const updated = await db.user.update({
-        where: { id: userId },
-        data: { planTier: normalizedPlan, role: newRole },
-      });
+      const updated = await setUserPlanTier(
+        {
+          userId,
+          planTier: normalizedPlan,
+          extraData: { role: newRole },
+          reason: "admin_assignment",
+          actor: req.user?.id ?? "admin",
+        },
+        db
+      );
       await recordAdminAction({
         db,
         actorUserId: req.user.id,

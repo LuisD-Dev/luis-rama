@@ -1,20 +1,57 @@
 import prisma from '../utils/prismaClient.js';
-import { canAccessPlan, PLAN_TIERS } from '../utils/plans.js';
+import { canAccessPlan, normalizePlanTier, PLAN_TIERS } from '../utils/plans.js';
 import { formatContent } from '../utils/serializers.js';
+import { buildFreeContentWhere, getContentPlanTier, isContentFree } from '../utils/contentAccess.js';
 import storage from '../storage/index.js';
 import { recordAdminAction } from '../services/adminAuditService.js';
+
+const DEFAULT_CONTENT_SIGNED_URL_TTL_SECONDS = 900;
+const MIN_CONTENT_SIGNED_URL_TTL_SECONDS = 300;
+const MAX_CONTENT_SIGNED_URL_TTL_SECONDS = 900;
+
+export const getContentSignedUrlTtlSeconds = () => {
+  const rawValue = process.env.CONTENT_SIGNED_URL_TTL_SECONDS;
+  if (typeof rawValue === 'undefined' || rawValue.trim() === '') {
+    return DEFAULT_CONTENT_SIGNED_URL_TTL_SECONDS;
+  }
+
+  const configured = Number(rawValue);
+  if (!Number.isInteger(configured)) {
+    console.warn(
+      `[Content] Invalid CONTENT_SIGNED_URL_TTL_SECONDS="${rawValue}"; ` +
+      `using default ${DEFAULT_CONTENT_SIGNED_URL_TTL_SECONDS}.`
+    );
+    return DEFAULT_CONTENT_SIGNED_URL_TTL_SECONDS;
+  }
+
+  const clamped = Math.min(
+    MAX_CONTENT_SIGNED_URL_TTL_SECONDS,
+    Math.max(MIN_CONTENT_SIGNED_URL_TTL_SECONDS, configured)
+  );
+
+  if (clamped !== configured) {
+    console.warn(
+      `[Content] CONTENT_SIGNED_URL_TTL_SECONDS=${configured} is outside ` +
+      `${MIN_CONTENT_SIGNED_URL_TTL_SECONDS}-${MAX_CONTENT_SIGNED_URL_TTL_SECONDS}; ` +
+      `using ${clamped}.`
+    );
+  }
+
+  return clamped;
+};
 
 const getUserAccess = async (userId) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { role: true, planTier: true },
+    select: { role: true, planTier: true, entitlementEpoch: true },
   });
 
   if (!user) return null;
-  return { role: user.role, plan_tier: user.planTier };
+  return { role: user.role, plan_tier: user.planTier, entitlementEpoch: user.entitlementEpoch };
 };
 
 const resolveContentUrls = async (items) => {
+  let signedUrlTtlSeconds;
   return Promise.all(
     items.map(async (item) => {
       const formatted = { ...item };
@@ -22,19 +59,43 @@ const resolveContentUrls = async (items) => {
         const normalized = formatted.url.startsWith('/uploads/')
           ? formatted.url.replace(/^\/uploads\//, '')
           : formatted.url;
-        formatted.url = storage.resolveUrl(normalized);
+        const planTier = getContentPlanTier(formatted);
+        formatted.url = planTier === 'free'
+          ? await storage.resolveUrl(normalized)
+          : await storage.resolveSignedUrl(normalized, {
+              expiresInSeconds: signedUrlTtlSeconds ??= getContentSignedUrlTtlSeconds(),
+            });
       }
       return formatted;
     })
   );
 };
 
+const resolveEffectiveUserPlanTier = (planTier) => {
+  if (planTier === null || planTier === undefined) {
+    return PLAN_TIERS.FREE;
+  }
+
+  if (typeof planTier !== 'string') {
+    return null;
+  }
+
+  const trimmedPlanTier = planTier.trim();
+  if (!trimmedPlanTier) {
+    return PLAN_TIERS.FREE;
+  }
+
+  return normalizePlanTier(trimmedPlanTier);
+};
+
 const filterContentForUser = (content, access) => {
   if (!access) {
-    return content.filter((item) => (item.plan_tier || 'free') === 'free');
+    return content.filter(isContentFree);
   }
   if (access.role === 'admin') return content;
-  return content.filter((item) => canAccessPlan(access.plan_tier, item.plan_tier || 'free'));
+
+  const effectiveUserTier = resolveEffectiveUserPlanTier(access.plan_tier);
+  return content.filter((item) => canAccessPlan(effectiveUserTier, getContentPlanTier(item)));
 };
 
 export const getContent = async (req, res) => {
@@ -49,7 +110,7 @@ export const getContent = async (req, res) => {
     let content = filterContentForUser(allContent, access);
     content = await resolveContentUrls(content);
 
-    res.json({ content });
+    res.json({ content, meta: { entitlementEpoch: access?.entitlementEpoch ?? null } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -98,8 +159,13 @@ export const uploadContent = async (req, res) => {
       finalUrl = storagePath;
     }
 
-    const selectedPlan = plan_tier || (is_free === '1' || is_free === 'true' || is_free === 'on' ? 'free' : 'basico');
-    if (!PLAN_TIERS.includes(selectedPlan)) {
+    const requestedPlan = plan_tier ?? (
+      is_free === '1' || is_free === 'true' || is_free === 'on'
+        ? PLAN_TIERS.FREE
+        : PLAN_TIERS.BASICO
+    );
+    const selectedPlan = normalizePlanTier(requestedPlan);
+    if (!selectedPlan || !PLAN_TIERS.includes(selectedPlan)) {
       return res.status(400).json({ error: 'Plan de contenido no válido' });
     }
 
@@ -118,11 +184,8 @@ export const uploadContent = async (req, res) => {
       },
     });
 
-    const content = formatContent(created);
-
-    if (storagePath) {
-      content.url = storage.resolveUrl(storagePath);
-    }
+    let content = formatContent(created);
+    [content] = await resolveContentUrls([content]);
 
     res.json({ message: 'Content uploaded', content });
   } catch (err) {
@@ -250,15 +313,37 @@ export const deleteContent = async (req, res) => {
   }
 };
 
-export const getFreeContent = async (_req, res) => {
+export const getFreeContent = async (req, res) => {
   try {
+    const selectors = {};
+
+    if (typeof req.query.id !== 'undefined') {
+      const requestedId = Number(req.query.id);
+      if (!Number.isInteger(requestedId) || requestedId <= 0) {
+        return res.status(404).json({ error: 'Free content not found' });
+      }
+      selectors.id = requestedId;
+    }
+
+    if (typeof req.query.path !== 'undefined') {
+      if (typeof req.query.path !== 'string' || !req.query.path) {
+        return res.status(404).json({ error: 'Free content not found' });
+      }
+      const requestedPath = req.query.path.startsWith('/uploads/')
+        ? req.query.path.replace(/^\/uploads\//, '')
+        : req.query.path;
+      selectors.url = { in: [requestedPath, `/uploads/${requestedPath}`] };
+    }
+
     const rows = await prisma.content.findMany({
-      where: {
-        OR: [{ planTier: 'free' }, { isFree: 1 }],
-      },
+      where: buildFreeContentWhere(selectors),
       include: { uploader: { select: { name: true } } },
       orderBy: { createdAt: 'desc' },
     });
+
+    if ((typeof req.query.id !== 'undefined' || typeof req.query.path !== 'undefined') && rows.length === 0) {
+      return res.status(404).json({ error: 'Free content not found' });
+    }
 
     let content = rows.map(formatContent);
     content = await resolveContentUrls(content);

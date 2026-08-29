@@ -13,9 +13,9 @@ export const STUDENT_PLANS = [
 ];
 
 export const planLabel = (tier) => {
-  if (!tier || tier === 'student') return '🎓 Estudiante';
+  if (!tier || tier === 'student') return 'Estudiante';
   const found = CONTENT_PLANS.find((p) => p.value === tier);
   if (found) return found.label.replace(/ —.*/, '').replace(/\(\$.*\)/, '').trim();
-  if (tier === 'premium') return '✨ Premium';
+  if (tier === 'premium') return 'Premium';
   return tier;
 };

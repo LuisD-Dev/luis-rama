@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Icon } from '../../components/common/Icons.jsx';
+import { Icon, UIIcon } from '../../components/common/Icons.jsx';
 import { useContent } from '../../context/ContentContext.jsx';
 import { adminService } from '../../services/api.js';
 import { useToast } from '../../context/ToastContext.jsx';
@@ -10,7 +10,7 @@ import { useKeyboardShortcuts, KeyboardShortcutsHelp } from '../../components/co
 
 export const AdminContentPage = () => {
   const navigate = useNavigate();
-  const { content, removeContent } = useContent();
+  const { content, error, openContent, removeContent } = useContent();
   const toast = useToast();
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -89,7 +89,7 @@ export const AdminContentPage = () => {
             <h2>Todo el contenido</h2>
             <div className="content-filters">
               <button className="button button-ghost small" onClick={() => setShowShortcuts(true)} title="Atajos de teclado" aria-label="Atajos de teclado">
-                ⌨️
+                <UIIcon name="keyboard" size={16} />
               </button>
               {['all','video','pdf','audio','image'].map(f => (
                 <button
@@ -102,6 +102,8 @@ export const AdminContentPage = () => {
               ))}
             </div>
           </div>
+
+          {error && <div className="error-message" role="alert">{error}</div>}
 
           {filteredContent.length === 0 ? (
             <div className="empty-state">
@@ -135,9 +137,9 @@ export const AdminContentPage = () => {
                       <td><StatusBadge status={item.type} type="content-type" /></td>
                       <td><StatusBadge status={item.status || 'published'} type="publish-status" /></td>
                       <td>{item.uploaded_by_name}</td>
-                      <td><StatusBadge status={item.plan_tier || (item.is_free ? 'free' : 'basico')} type="plan" /></td>
+                      <td><StatusBadge status={item.plan_tier || 'basico'} type="plan" /></td>
                       <td className="td-actions">
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
+                        <a href={item.url} onClick={(event) => { event.preventDefault(); openContent(item); }} target="_blank" rel="noopener noreferrer" className="button button-secondary small">Ver</a>
                         <button
                           onClick={() => setDeleteTarget(item)}
                           className="button button-danger small"

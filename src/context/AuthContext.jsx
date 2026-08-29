@@ -24,6 +24,7 @@ export const AuthProvider = ({ children, onSessionExpiredToast }) => {
   const [token, setToken] = useState(() => getStoredToken());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [entitlementEpoch, setEntitlementEpoch] = useState(null);
 
   const clearSession = useCallback(({ reason = null, redirectTo = null } = {}) => {
     abortPendingRequests();
@@ -31,6 +32,7 @@ export const AuthProvider = ({ children, onSessionExpiredToast }) => {
     localStorage.removeItem('lastLoginEmail');
     setToken(null);
     setUser(null);
+    setEntitlementEpoch(null);
     setError(null);
 
     if (typeof window !== 'undefined' && redirectTo) {
@@ -63,6 +65,7 @@ export const AuthProvider = ({ children, onSessionExpiredToast }) => {
       }
       setToken(storedToken);
       setUser(enriched);
+      setEntitlementEpoch(enriched?.entitlement_epoch ?? null);
       setError(null);
       return enriched;
     } catch (err) {
@@ -131,6 +134,7 @@ export const AuthProvider = ({ children, onSessionExpiredToast }) => {
       }
       setToken(res.data.token);
       setUser(enriched);
+      setEntitlementEpoch(enriched?.entitlement_epoch ?? null);
       return res.data;
     } catch (err) {
       const message = err.response?.data?.error || 'Login failed';
@@ -150,6 +154,7 @@ export const AuthProvider = ({ children, onSessionExpiredToast }) => {
       const enriched = enrichUser(res.data.user);
       setToken(res.data.token);
       setUser(enriched);
+      setEntitlementEpoch(enriched?.entitlement_epoch ?? null);
       return res.data;
     } catch (err) {
       const message = err.response?.data?.error || 'Signup failed';
@@ -192,6 +197,7 @@ export const AuthProvider = ({ children, onSessionExpiredToast }) => {
         logout,
         clearSession,
         refreshSession,
+        entitlementEpoch,
       }}
     >
       {children}

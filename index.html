@@ -3,16 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Teclia | Aprende piano sin límites</title>
+    <title>Teclia | Academia de piano online</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" href="/Imagenes/teclia_logo.png" />
+    <meta name="theme-color" content="#0a0a0c" />
     <meta
       name="description"
-      content="Teclia es una plataforma de aprendizaje de piano con diseño elegante, lecciones premium y recursos gratuitos para todos."
+      content="Teclia es una academia de piano online con lecciones en video, partituras, teclado interactivo y planes flexibles para aprender a tu ritmo."
     />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://teclia-academia-2.onrender.com https://*.supabase.co; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Teclia" />
+    <meta property="og:title" content="Teclia | Academia de piano online" />
+    <meta
+      property="og:description"
+      content="Aprende piano con acompañamiento real: lecciones en video, partituras incluidas y planes flexibles."
+    />
+    <meta property="og:image" content="/favicon.svg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Teclia | Academia de piano online" />
+    <meta
+      name="twitter:description"
+      content="Aprende piano con acompañamiento real: lecciones en video, partituras incluidas y planes flexibles."
+    />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://teclia-academia-2.onrender.com https://*.supabase.co https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; form-action 'self'" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div id="root"></div>
@@ -21,4 +37,137 @@
 </html>
 
 
+const jwt = require('jsonwebtoken');
 
+const PLAN_PRICES = {
+  basico: 19,
+  pro: 49,
+  master: 99
+};
+
+let prisma;
+try {
+  const { PrismaClient } = require('@prisma/client');
+  prisma = new PrismaClient();
+} catch {
+  prisma = {
+    payment: {
+      create: async () => { throw new Error('Prisma not configured'); },
+      findUnique: async () => { throw new Error('Prisma not configured'); },
+      update: async () => { throw new Error('Prisma not configured'); }
+    },
+    user: {
+      findUnique: async () => { throw new Error('Prisma not configured'); },
+      update: async () => { throw new Error('Prisma not configured'); }
+    },
+    $transaction: async (callback) => callback(prisma)
+  };
+}
+
+function requireJwt(req, res, next) {
+  if (req.user?.id) return next();
+
+  const authHeader = req.headers.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
+    return next();
+  } catch {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+}
+
+async function createPaymentIntent(req, res) {
+  try {
+    const { plan_tier } = req.body || {};
+
+    if (!plan_tier || !PLAN_PRICES[plan_tier]) {
+      return res.status(400).json({ error: 'invalid_plan' });
+    }
+
+    if (!req.user?.id) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'admin_not_allowed' });
+    }
+
+    const payment = await prisma.payment.create({
+      data: {
+        userId: req.user.id,
+        planTier: plan_tier,
+        amount: PLAN_PRICES[plan_tier],
+        currency: 'USD',
+        status: 'pending'
+      }
+    });
+
+    return res.status(201).json({
+      paymentId: payment.id,
+      status: payment.status,
+      plan_tier: payment.planTier,
+      amount: payment.amount
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+}
+
+async function confirmPaymentIntent(req, res) {
+  // Temporary simulation. Replace with Stripe webhooks later.
+  try {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const { id } = req.params;
+    const payment = await prisma.payment.findUnique({ where: { id } });
+
+    if (!payment) {
+      return res.status(404).json({ error: 'payment_not_found' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const updatedPayment = await tx.payment.update({
+        where: { id },
+        data: { status: 'completed' }
+      });
+
+      const currentUser = await tx.user.findUnique({ where: { id: payment.userId } });
+      if (!currentUser) throw new Error('user_not_found');
+
+      await tx.user.update({
+        where: { id: payment.userId },
+        data: {
+          planTier: payment.planTier,
+          role: currentUser.role === 'admin' ? 'admin' : 'user'
+        }
+      });
+
+      return updatedPayment;
+    });
+
+    return res.json({
+      paymentId: result.id,
+      status: result.status,
+      plan_tier: result.planTier,
+      amount: result.amount
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+}
+
+module.exports = {
+  prisma,
+  requireJwt,
+  createPaymentIntent,
+  confirmPaymentIntent
+};
