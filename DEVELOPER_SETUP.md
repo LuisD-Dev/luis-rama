@@ -134,6 +134,53 @@ Use these only while Stripe is in test mode. Use any future expiration date and 
 
 Do not use real card details in test mode. See Stripe's current [testing documentation](https://docs.stripe.com/testing) for more scenarios.
 
+### Stripe webhook setup
+
+Configure exactly one Stripe webhook destination: `POST /api/webhooks/stripe`. This is the canonical endpoint for every supported Stripe payment and subscription event. `POST /api/payments/webhook` is retained only as a thin compatibility alias; it calls the same signature verifier and dispatcher. Do not register the alias as a second Stripe destination. Stripe issues an endpoint signing secret for each destination, while this application intentionally accepts one `STRIPE_WEBHOOK_SECRET` for the one canonical destination.
+
+For local development, run the backend on its default port and start Stripe CLI with this exact command:
+
+```bash
+stripe listen --forward-to localhost:3001/api/webhooks/stripe
+```
+
+Copy the `whsec_...` signing secret printed by Stripe CLI into `Backend/.env`:
+
+```dotenv
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_WEBHOOK_TOLERANCE_SEC=300
+```
+
+`STRIPE_WEBHOOK_TOLERANCE_SEC` is the maximum accepted age of the signed timestamp in seconds and defaults to `300` when omitted. The backend passes the exact request `Buffer` to `stripe.webhooks.constructEvent` without `JSON.parse`, re-serialization, trimming, or text re-encoding; the raw webhook middleware therefore must run before any JSON parser.
+
+For a deployed Stripe destination, store that destination's own `whsec_...` endpoint signing secret in the backend environment. Secrets from Stripe CLI, Preview, and Production are environment-specific and must not be interchanged.
+
+#### Vercel routing and raw request bodies
+
+The public Stripe destination remains `/api/webhooks/stripe`. The `vercel.json` rewrite sends `/api/(.*)` internally to the `/api` serverless function, which then dispatches the original request path through Express. `/api` is the internal rewrite destination, not the webhook URL to enter in Stripe.
+
+Set `NODEJS_HELPERS=0` in **Vercel Project Settings > Environment Variables** and apply it to Production, Preview, and Development, then redeploy. This prevents Vercel's Node.js request helpers from consuming or parsing the body before the application can verify its exact bytes. On Vercel production, a startup assertion rejects any value other than exactly `0`; a missing or different value prevents the complete application from starting. Production also fails at application startup when `STRIPE_WEBHOOK_SECRET` is missing, so unsigned webhook processing is never enabled accidentally.
+
+#### Webhook HTTP contract
+
+| Result | HTTP status | Stripe behavior |
+| --- | --- | --- |
+| Valid event processed or intentionally ignored | `200` | Delivery is acknowledged. |
+| Event already committed under the same `PaymentEvent.stripeEventId` | `200` | Duplicate delivery is an idempotent no-op. |
+| Missing/invalid signature, timestamp outside tolerance, or invalid JSON | `400` | Delivery is rejected before dispatch. |
+| Verified event encounters a retryable processing or persistence error | `500` | Delivery is not acknowledged, so Stripe can retry. |
+| Webhook configuration is unavailable at request time outside the production startup check | `503` | Delivery is not acknowledged; restore configuration before retrying. |
+
+### Security review notes
+
+- **Canonical destination:** Register only `/api/webhooks/stripe`. `/api/payments/webhook` exists for backward-compatible callers but shares the canonical verifier, dispatcher, secret, status mapping, and idempotency boundary. Registering both would create two Stripe destinations and two endpoint secrets, contrary to the one-secret configuration.
+- **Account compromise:** Signature verification proves that a request was signed with the configured endpoint secret; it cannot protect against a compromised Stripe account or an attacker who can read or rotate that secret. Stripe account access controls and monitoring remain required.
+- **Secret lifecycle:** Store `STRIPE_WEBHOOK_SECRET` only in backend secret storage, separately for each environment. Never expose it through a `VITE_` variable, source control, client output, or logs. Limit access, rotate immediately after suspected disclosure, and update the Stripe destination and backend deployment together. A mismatched secret fails closed with `400` until configuration converges, while Stripe retains the delivery for retry according to its policy.
+- **Fail-closed tradeoff:** Missing `STRIPE_WEBHOOK_SECRET` or an invalid `NODEJS_HELPERS` setting in Vercel production prevents the complete application from starting. This closes the prior failure mode where a production deploy without the secret could skip verification and accept attacker-supplied webhook events. The deliberate availability tradeoff is that non-payment API routes are also unavailable until configuration is repaired.
+- **Replay and tolerance limits:** The default `300`-second tolerance rejects stale signed requests but does not by itself prevent a replay inside that window. The unique `PaymentEvent.stripeEventId` claim provides the committed-event idempotency boundary. A verified event whose database transaction rolls back remains retryable because its claim rolls back too.
+- **Platform limit:** Exact signature verification depends on every proxy/runtime preserving request bytes. `NODEJS_HELPERS=0` addresses the known Vercel parsing layer. Altered bytes that still reach the raw parser fail signature verification with `400`; a body consumed or converted before the raw parser is detected as a pipeline error and fails closed with `500`. Either condition must be removed operationally.
+- **Preview smoke test:** Before promoting a deployment, configure Preview with `NODEJS_HELPERS=0` and its own test-mode `whsec_...`, send a Stripe test delivery to the Preview deployment's public `/api/webhooks/stripe` path, and confirm `200`. Redeliver the same event and confirm another `200` with a duplicate outcome; use an invalid signature or altered body and confirm `400`. Verify that only one `PaymentEvent.stripeEventId` was committed. Preview is a validation step, not a substitute for keeping the Production settings correct.
+
 ## 8) Connecting to Supabase (optional)
 
 If you prefer to use Supabase for storage and/or Postgres hosting:
@@ -183,7 +230,7 @@ node ./scripts/purge_non_admins.js
 
 Stripe webhooks are the primary way `Payment` rows move from `pending` through `processing` to canonical `succeeded`. Webhooks can be lost — a deploy restarts the server mid-delivery, the handler 500s, `STRIPE_WEBHOOK_SECRET` gets rotated without updating the Dashboard, or Stripe simply can't reach the endpoint for a while. When that happens, Stripe's own record of a `PaymentIntent` is the source of truth and the local `Payment` row silently drifts out of sync. `npm run payments:reconcile` (`Backend/scripts/reconcilePayments.js`, backed by `Backend/services/paymentReconcileService.js`) detects and repairs that drift.
 
-It complements, not replaces, the webhook handlers in [routes/webhooks.js](Backend/routes/webhooks.js) and [controllers/paymentsController.js](Backend/controllers/paymentsController.js) — run it after an incident, not instead of fixing webhook delivery.
+It complements, not replaces, the shared webhook handler in [routes/webhooks.js](Backend/routes/webhooks.js) — run it after an incident, not instead of fixing webhook delivery.
 
 ### When to run it
 

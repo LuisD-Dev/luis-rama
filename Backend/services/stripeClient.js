@@ -1,12 +1,16 @@
 import Stripe from 'stripe';
 
+// Upgrading the SDK must not silently upgrade the API contract used by the
+// reconciliation client. stripe@17.7.0 used this Acacia API version.
+const STRIPE_API_VERSION = '2025-02-24.acacia';
+
 let cachedClient = null;
 let cachedKey = null;
 
 /**
  * Lazily construct the Stripe SDK client from STRIPE_SECRET_KEY. Throws instead
- * of falling back to a placeholder key (unlike paymentService's webhook-signature
- * client) because every call here hits the real Stripe API.
+ * of using the offline verifier's placeholder key because every call here hits
+ * the real Stripe API.
  */
 const getClient = () => {
   const key = process.env.STRIPE_SECRET_KEY;
@@ -14,7 +18,7 @@ const getClient = () => {
     throw new Error('STRIPE_SECRET_KEY is required to contact Stripe.');
   }
   if (!cachedClient || cachedKey !== key) {
-    cachedClient = new Stripe(key);
+    cachedClient = new Stripe(key, { apiVersion: STRIPE_API_VERSION });
     cachedKey = key;
   }
   return cachedClient;

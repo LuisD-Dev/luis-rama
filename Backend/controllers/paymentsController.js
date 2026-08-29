@@ -3,8 +3,6 @@ import {
   confirmSimulatedPayment,
   createCheckoutSession,
   createSimulatedPayment,
-  constructStripeEvent,
-  processStripeWebhookEvent,
   PaymentConfirmationConflictError,
   PaymentNotFoundError,
   PaymentServiceError,
@@ -110,38 +108,4 @@ export const confirmPaymentIntent = async (req, res) => {
   }
 };
 
-/**
- * POST /api/payments/webhook — Stripe subscription lifecycle events.
- * Verifies stripe-signature against the raw body, delegates state changes to
- * paymentService, and maps the outcome to an HTTP status: 400 for a bad/missing
- * signature, 200 once the event has been recorded (handled or ignored), 500 on
- * internal failure so Stripe retries the delivery.
- */
-export const stripeWebhook = async (req, res) => {
-  const signature = req.headers['stripe-signature'];
-
-  if (!signature) {
-    return res.status(400).json({ error: 'Missing stripe-signature header' });
-  }
-
-  let event;
-  try {
-    event = constructStripeEvent(req.body, signature);
-  } catch (err) {
-    console.warn({ err: err.message }, 'Stripe webhook signature verification failed');
-    return res.status(400).json({ error: 'Invalid signature' });
-  }
-
-  try {
-    const result = await processStripeWebhookEvent(event);
-    return res.status(200).json({ received: true, outcome: result.outcome });
-  } catch (err) {
-    console.error(
-      { stripeEventId: event?.id, eventType: event?.type, err: err.message },
-      'Stripe webhook processing failed'
-    );
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-export default { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook };
+export default { checkout, createPaymentIntent, confirmPaymentIntent };

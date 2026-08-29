@@ -8,32 +8,60 @@ setupTestDb();
 
 const stripe = new Stripe('sk_test_dummy_key_for_signature_tests');
 const WEBHOOK_SECRET = 'whsec_test_secret_for_payments_webhook';
+const CANONICAL_WEBHOOK_PATH = '/api/webhooks/stripe';
+const WEBHOOK_ALIAS_PATH = '/api/payments/webhook';
 
-const sign = (payloadString, secret = WEBHOOK_SECRET) =>
-  stripe.webhooks.generateTestHeaderString({ payload: payloadString, secret });
+const sign = (payloadString, secret = WEBHOOK_SECRET, timestamp) =>
+  stripe.webhooks.generateTestHeaderString({
+    payload: payloadString,
+    secret,
+    ...(timestamp === undefined ? {} : { timestamp }),
+  });
 
-const postEvent = (event, { signature, omitSignature = false } = {}) => {
-  const payloadString = JSON.stringify(event);
-  const header = omitSignature ? undefined : signature || sign(payloadString);
+const postRawPayload = (
+  payloadString,
+  {
+    path = CANONICAL_WEBHOOK_PATH,
+    signature,
+    omitSignature = false,
+    secret = WEBHOOK_SECRET,
+    timestamp,
+  } = {}
+) => {
+  const header = omitSignature
+    ? undefined
+    : signature || sign(payloadString, secret, timestamp);
   const req = request(app)
-    .post('/api/payments/webhook')
+    .post(path)
     .set('Content-Type', 'application/json');
   if (header) req.set('stripe-signature', header);
   return req.send(payloadString);
 };
 
-describe('POST /api/payments/webhook', () => {
+const postEvent = (event, options) => {
+  const payloadString = JSON.stringify(event);
+  return postRawPayload(payloadString, options);
+};
+
+describe('Stripe webhook (canonical /api/webhooks/stripe)', () => {
   let previousEnv;
   let testUserId;
 
   beforeEach(async () => {
     previousEnv = {
+      NODE_ENV: process.env.NODE_ENV,
       STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
+      STRIPE_WEBHOOK_TOLERANCE_SEC:
+        process.env.STRIPE_WEBHOOK_TOLERANCE_SEC,
+      VERCEL: process.env.VERCEL,
+      NODEJS_HELPERS: process.env.NODEJS_HELPERS,
       STRIPE_PRICE_BASICO: process.env.STRIPE_PRICE_BASICO,
       STRIPE_PRICE_PRO: process.env.STRIPE_PRICE_PRO,
       STRIPE_PRICE_MASTER: process.env.STRIPE_PRICE_MASTER,
     };
+    process.env.NODE_ENV = 'test';
     process.env.STRIPE_WEBHOOK_SECRET = WEBHOOK_SECRET;
+    delete process.env.STRIPE_WEBHOOK_TOLERANCE_SEC;
     process.env.STRIPE_PRICE_BASICO = 'price_test_basico';
     process.env.STRIPE_PRICE_PRO = 'price_test_pro';
     process.env.STRIPE_PRICE_MASTER = 'price_test_master';
@@ -66,6 +94,45 @@ describe('POST /api/payments/webhook', () => {
   });
 
   describe('signature verification', () => {
+    test('missing runtime webhook configuration returns 503 without dispatching', async () => {
+      const event = {
+        id: 'evt_missing_runtime_secret',
+        type: 'test.unhandled',
+        data: { object: {} },
+      };
+      delete process.env.STRIPE_WEBHOOK_SECRET;
+
+      const res = await postEvent(event);
+
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toEqual({
+        error: 'Stripe webhook verification unavailable',
+      });
+      await expect(
+        prisma.paymentEvent.findUnique({
+          where: { stripeEventId: event.id },
+        })
+      ).resolves.toBeNull();
+    });
+
+    test('a valid SDK-signed payload is accepted by the canonical endpoint', async () => {
+      const event = {
+        id: 'evt_valid_sdk_signature',
+        type: 'test.unhandled',
+        data: { object: {} },
+      };
+
+      const res = await postEvent(event);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual({ received: true, outcome: 'ignored' });
+      await expect(
+        prisma.paymentEvent.findUnique({
+          where: { stripeEventId: event.id },
+        })
+      ).resolves.toMatchObject({ outcome: 'ignored' });
+    });
+
     test('missing stripe-signature header returns 400 and processes nothing', async () => {
       const event = {
         id: 'evt_missing_sig',
@@ -87,11 +154,96 @@ describe('POST /api/payments/webhook', () => {
         data: { object: { id: 'sub_bad_sig' } },
       };
 
-      const res = await postEvent(event, { signature: sign(JSON.stringify(event), 'whsec_totally_wrong_secret') });
+      const res = await postEvent(event, {
+        secret: 'whsec_totally_wrong_secret',
+      });
 
       expect(res.statusCode).toBe(400);
       const stored = await prisma.paymentEvent.findUnique({ where: { stripeEventId: event.id } });
       expect(stored).toBeNull();
+    });
+
+    test('a body changed after signing returns 400 and processes nothing', async () => {
+      const signedEvent = {
+        id: 'evt_body_before_tamper',
+        type: 'test.unhandled',
+        data: { object: { value: 'original' } },
+      };
+      const tamperedEvent = {
+        ...signedEvent,
+        id: 'evt_body_after_tamper',
+        data: { object: { value: 'tampered' } },
+      };
+      const signedPayload = JSON.stringify(signedEvent);
+      const tamperedPayload = JSON.stringify(tamperedEvent);
+
+      const res = await postRawPayload(tamperedPayload, {
+        signature: sign(signedPayload),
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(
+        await prisma.paymentEvent.findMany({
+          where: {
+            stripeEventId: {
+              in: [signedEvent.id, tamperedEvent.id],
+            },
+          },
+        })
+      ).toHaveLength(0);
+    });
+
+    test('an expired timestamp returns 400 using the configured tolerance', async () => {
+      const event = {
+        id: 'evt_expired_signature_timestamp',
+        type: 'test.unhandled',
+        data: { object: {} },
+      };
+      const payloadString = JSON.stringify(event);
+      const timestamp = Math.floor(Date.now() / 1000) - 30;
+      process.env.STRIPE_WEBHOOK_TOLERANCE_SEC = '5';
+
+      const res = await postRawPayload(payloadString, { timestamp });
+
+      expect(res.statusCode).toBe(400);
+      await expect(
+        prisma.paymentEvent.findUnique({
+          where: { stripeEventId: event.id },
+        })
+      ).resolves.toBeNull();
+    });
+
+    test('signed malformed JSON returns 400 before dispatch', async () => {
+      const malformedPayload = '{"id":"evt_signed_malformed","type":';
+
+      const res = await postRawPayload(malformedPayload);
+
+      expect(res.statusCode).toBe(400);
+      await expect(
+        prisma.paymentEvent.findUnique({
+          where: { stripeEventId: 'evt_signed_malformed' },
+        })
+      ).resolves.toBeNull();
+    });
+
+    test('the app preserves non-canonical JSON bytes for signature verification', async () => {
+      const payloadString = [
+        '{',
+        '  "type" : "test.unhandled",',
+        '  "data" : { "object" : { "spaced" : true } },',
+        '  "id" : "evt_noncanonical_raw_body"',
+        '}',
+      ].join('\n');
+
+      const res = await postRawPayload(payloadString);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual({ received: true, outcome: 'ignored' });
+      await expect(
+        prisma.paymentEvent.findUnique({
+          where: { stripeEventId: 'evt_noncanonical_raw_body' },
+        })
+      ).resolves.toMatchObject({ outcome: 'ignored' });
     });
   });
 
@@ -523,7 +675,41 @@ describe('POST /api/payments/webhook', () => {
   });
 
   describe('idempotency', () => {
-    test('the same event delivered twice only applies its effect once', async () => {
+    test('both webhook paths bypass the generic IP rate limiter', async () => {
+      const event = {
+        id: 'evt_webhook_rate_limit_bypass',
+        type: 'test.unhandled',
+        data: { object: {} },
+      };
+      process.env.NODE_ENV = 'production';
+      process.env.VERCEL = '1';
+      process.env.NODEJS_HELPERS = '0';
+
+      const responses = [];
+      for (let delivery = 0; delivery < 101; delivery += 1) {
+        responses.push(
+          await postEvent(event, {
+            path:
+              delivery % 2 === 0
+                ? CANONICAL_WEBHOOK_PATH
+                : WEBHOOK_ALIAS_PATH,
+          })
+        );
+      }
+
+      expect(responses.every(({ statusCode }) => statusCode === 200)).toBe(true);
+      expect(responses[0].body.outcome).toBe('ignored');
+      expect(
+        responses.slice(1).every(({ body }) => body.outcome === 'duplicate')
+      ).toBe(true);
+      await expect(
+        prisma.paymentEvent.findMany({
+          where: { stripeEventId: event.id },
+        })
+      ).resolves.toHaveLength(1);
+    });
+
+    test('canonical endpoint and thin alias share one dispatcher and event claim', async () => {
       const subscriptionExternalId = `sub_test_dup_${Date.now()}`;
       await prisma.user.update({
         where: { id: testUserId },
@@ -549,11 +735,11 @@ describe('POST /api/payments/webhook', () => {
 
       const res1 = await postEvent(event);
       expect(res1.statusCode).toBe(200);
-      expect(res1.body.outcome).toBe('processed');
+      expect(res1.body).toEqual({ received: true, outcome: 'processed' });
 
-      const res2 = await postEvent(event);
+      const res2 = await postEvent(event, { path: WEBHOOK_ALIAS_PATH });
       expect(res2.statusCode).toBe(200);
-      expect(res2.body.outcome).toBe('duplicate');
+      expect(res2.body).toEqual({ received: true, outcome: 'duplicate' });
 
       const events = await prisma.paymentEvent.findMany({ where: { stripeEventId: event.id } });
       expect(events).toHaveLength(1);
@@ -564,7 +750,7 @@ describe('POST /api/payments/webhook', () => {
   });
 
   describe('transactional rollback', () => {
-    test('a failure mid-transaction leaves no partial state behind', async () => {
+    test('a verified retryable failure returns 500, rolls back, and succeeds on retry', async () => {
       const conflictingUser = await prisma.user.create({
         data: {
           email: `test-webhook-conflict-${Date.now()}@example.com`,
@@ -627,6 +813,36 @@ describe('POST /api/payments/webhook', () => {
       expect(auditEntries).toHaveLength(0);
 
       await prisma.user.delete({ where: { id: conflictingUser.id } });
+
+      const retry = await postEvent(event);
+
+      expect(retry.statusCode).toBe(200);
+      expect(retry.body).toEqual({ received: true, outcome: 'processed' });
+      await expect(
+        prisma.paymentEvent.findUnique({
+          where: { stripeEventId: event.id },
+        })
+      ).resolves.toMatchObject({ outcome: 'processed' });
+      await expect(
+        prisma.payment.findUnique({ where: { id: payment.id } })
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      await expect(
+        prisma.subscription.findUnique({
+          where: {
+            provider_externalId: {
+              provider: 'stripe',
+              externalId: 'sub_test_rollback_1',
+            },
+          },
+        })
+      ).resolves.toMatchObject({ status: 'active', planTier: 'basico' });
+      await expect(
+        prisma.user.findUnique({ where: { id: testUserId } })
+      ).resolves.toMatchObject({
+        stripeCustomerId: 'cus_conflict_taken',
+        planTier: 'basico',
+        role: 'premium',
+      });
     });
   });
 });

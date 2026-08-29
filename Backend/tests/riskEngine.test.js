@@ -166,7 +166,7 @@ describe('risk guard integration', () => {
     expect(signals.failsIpHour).toBeGreaterThanOrEqual(12);
   });
 
-  test('idempotent replay still records decision but skips double-charge', async () => {
+  test('idempotent replay still records a decision and reuses the validated payment', async () => {
     process.env.RISK_ENGINE_MODE = 'shadow';
     const key = `replay-${Date.now()}`;
     const first = await request(app).post('/api/payments/payment-method')
@@ -177,8 +177,11 @@ describe('risk guard integration', () => {
     const second = await request(app).post('/api/payments/payment-method')
       .set('Authorization', `Bearer ${token}`)
       .send({ paymentMethodId: 'pm_replay', planTier: 'basico', idempotencyKey: key });
+    expect(second.statusCode).toBe(200);
     expect(second.body.paymentId).toBe(paymentId);
-    expect(second.body.replay).toBe(true);
+    expect(second.body).toEqual(first.body);
+    const payments = await prisma.payment.findMany({ where: { idempotencyKey: key } });
+    expect(payments).toHaveLength(1);
     const decisions = await prisma.riskDecision.findMany({ where: { userId } });
     expect(decisions.length).toBe(2);
   });

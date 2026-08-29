@@ -1094,6 +1094,56 @@ describe('paymentService', () => {
       ]);
     });
 
+    test('a duplicate event ID returns duplicate without invoking the real entitlement writer twice', async () => {
+      const payment = await prisma.payment.create({
+        data: {
+          userId,
+          amount: 2499,
+          currency: 'usd',
+          planTier: 'pro',
+          provider: 'stripe',
+          paymentMethodId: 'pm_duplicate_entitlement',
+          stripePaymentIntentId: 'pi_duplicate_entitlement',
+          idempotencyKey: `duplicate-entitlement-${Date.now()}`,
+          status: PAYMENT_STATUSES.PENDING,
+        },
+      });
+      const event = successEvent({
+        id: 'evt_duplicate_entitlement_once',
+        payment,
+      });
+      const entitlementWriter = jest.fn(
+        (tx, args) => activateOneTimePaymentEntitlement(tx, args)
+      );
+
+      const first = await processPaymentIntentWebhookEvent({
+        event,
+        entitlementWriter,
+      });
+      const duplicate = await processPaymentIntentWebhookEvent({
+        event,
+        entitlementWriter,
+      });
+
+      expect(first).toMatchObject({
+        outcome: 'processed',
+        entitlementActivated: true,
+      });
+      expect(duplicate).toMatchObject({
+        outcome: 'duplicate',
+        entitlementActivated: false,
+      });
+      expect(entitlementWriter).toHaveBeenCalledTimes(1);
+      await expect(
+        prisma.paymentEvent.findMany({
+          where: { stripeEventId: event.id },
+        })
+      ).resolves.toHaveLength(1);
+      await expect(
+        prisma.payment.findUnique({ where: { id: payment.id } })
+      ).resolves.toMatchObject({ status: PAYMENT_STATUSES.SUCCEEDED });
+    });
+
     test('handles a duplicate P2002 only after the transaction rejects and preserves the original event outcome', async () => {
       const uniqueError = Object.assign(new Error('event claim conflict'), {
         code: 'P2002',

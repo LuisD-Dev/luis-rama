@@ -6,7 +6,7 @@ import {
   PaymentServiceError,
 } from '../services/paymentService.js';
 import { PaymentTransitionError } from '../services/paymentStateMachine.js';
-import { checkout, createPaymentIntent, confirmPaymentIntent, stripeWebhook } from '../controllers/paymentsController.js';
+import { checkout, createPaymentIntent, confirmPaymentIntent } from '../controllers/paymentsController.js';
 import { verifyToken, adminOnly } from '../middleware/auth.js';
 import prisma from '../utils/prismaClient.js';
 import { evaluate, collectSignals, persistDecision, getMode, hashIp, getClientIp, httpStatusForDecision, withRiskLock } from '../services/riskEngine.js';
@@ -99,17 +99,9 @@ router.post(
       const ipForLock = hashIp(getClientIp(req));
       const lockKey = `${userId}:${ipForLock}`;
       const outcome = await withRiskLock(lockKey, async () => {
-        // Idempotent replay detection: if payment already exists, still record risk decision but skip double Stripe charge
-        const existing = await prisma.payment.findUnique({ where: { idempotencyKey: effectiveIdempotencyKey } });
         const guard = await riskGuard(req, { planTier, paymentMethodId, path: '/api/payments/payment-method' });
         if (guard.mode === 'enforce' && guard.result.decision !== 'allow') {
-          return { blocked: true, guard, existing };
-        }
-        if (existing) {
-          if (!existing.ipHash) {
-            await prisma.payment.update({ where: { id: existing.id }, data: { ipHash: guard.ipHash } }).catch(()=>{});
-          }
-          return { replay: true, payment: existing, guard };
+          return { blocked: true, guard };
         }
         const payment = await createOrReusePayment({
           userId,
@@ -121,10 +113,26 @@ router.post(
         if (payment && !payment.ipHash) {
           await prisma.payment.update({ where: { id: payment.id }, data: { ipHash: guard.ipHash } }).catch(()=>{});
         }
-        return { payment, guard };
+        return { payment };
       });
 
-      res.json({
+      if (outcome.blocked) {
+        const { guard } = outcome;
+        const status = httpStatusForDecision(guard.result.decision);
+        const code = guard.result.decision === 'block' ? 'RISK_BLOCK' : 'RISK_CHALLENGE';
+        return res.status(status).json({
+          error: guard.result.decision === 'block' ? 'risk_block' : 'risk_challenge',
+          code,
+          decision: guard.result.decision,
+          reasons: guard.result.reasons,
+          message: guard.result.decision === 'challenge'
+            ? 'Re-auth required: please log in again or wait and retry.'
+            : 'Payment blocked by risk policy.',
+        });
+      }
+
+      const { payment } = outcome;
+      return res.json({
         paymentId: payment.id,
         stripePaymentIntentId: payment.stripePaymentIntentId,
         status: payment.status,
@@ -181,10 +189,5 @@ router.post(
     }
   }
 );
-
-// No verifyToken/validate: Stripe calls this directly and body must stay raw
-// (see express.raw() mounted ahead of express.json() in app.js) so the
-// stripe-signature header can be verified against the exact bytes sent.
-router.post('/webhook', stripeWebhook);
 
 export default router;

@@ -353,9 +353,27 @@ Run the fallback dry run first against the target database. The apply command co
 
 Entitlement activation may occur only for the execution that actually wins the compare-and-set transition from `processing` to `succeeded`. Merely observing an already-succeeded Payment never reactivates entitlement. This rule covers duplicate webhook delivery, repeated admin confirmation, distinct success deliveries, and concurrent success processing.
 
-### PaymentIntent webhook delivery
+### Stripe webhook delivery
 
-`POST /api/webhooks/stripe` processes one-time PaymentIntent events. After signature handling, a valid delivery is claimed by the unique `PaymentEvent.stripeEventId` boundary. The claim, Payment resolution, state transitions, winner-gated entitlement activation, and final event outcome are committed atomically.
+- Canonical endpoint: `POST /api/webhooks/stripe`
+- Compatibility alias: `POST /api/payments/webhook`
+- Auth: no JWT; Stripe authenticates with the `stripe-signature` header over the exact raw request body.
+
+Configure Stripe to deliver every supported payment and subscription event to the canonical endpoint only. The payments-path endpoint is a thin backward-compatibility alias that calls the same verifier and dispatcher; it is not a second Stripe destination. Both paths therefore have identical signature, response, dispatch, and idempotency behavior under the single `STRIPE_WEBHOOK_SECRET` configured for the canonical destination.
+
+The verifier passes the original request `Buffer` directly to `stripe.webhooks.constructEvent`, without parsing, re-serialization, trimming, or text re-encoding. `STRIPE_WEBHOOK_TOLERANCE_SEC` controls the signed-timestamp tolerance and defaults to `300` seconds. No JSON/body parser may run before the route-specific raw-body middleware. On Vercel, `NODEJS_HELPERS=0` is required so the external `/api/webhooks/stripe` request retains its exact bytes through the `/api/(.*)` to `/api` rewrite.
+
+| Condition | Response |
+| --- | --- |
+| Valid event processed or intentionally ignored | `200` |
+| Duplicate event already committed under the same `PaymentEvent.stripeEventId` | `200` |
+| Missing/invalid signature, timestamp outside tolerance, or invalid JSON | `400` |
+| Verified event fails with a retryable dispatcher/database error | `500` |
+| Webhook configuration is unavailable at request time outside the production startup check | `503` |
+
+Production fails during application startup when `STRIPE_WEBHOOK_SECRET` is missing. A Vercel production deployment likewise fails startup unless `NODEJS_HELPERS` is exactly `0`. These fail-closed checks prevent the application from accepting unsigned webhooks or a request body that Vercel may already have parsed.
+
+After verification, a valid delivery is claimed by the unique `PaymentEvent.stripeEventId` boundary. The claim, Payment resolution, state transitions, winner-gated entitlement activation, and final event outcome are committed atomically.
 
 A PaymentIntent event resolves its local Payment in this order:
 

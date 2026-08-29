@@ -10,12 +10,31 @@ import statsRoutes from './routes/stats.js';
 import mediaRoutes from './routes/media.js';
 import adminRoutes from './routes/admin.js';
 import paymentsRoutes from './routes/payments.js';
-import webhooksRoutes from './routes/webhooks.js';
+import webhooksRoutes, { stripeWebhookHandler } from './routes/webhooks.js';
+import { assertStripeWebhookConfig } from './services/stripeWebhook.js';
+
+if (process.env.NODE_ENV === 'production') {
+  // Fail the process/cold start before accepting any unsigned payment event.
+  // On Vercel this also enforces NODEJS_HELPERS=0 so no JSON getter touches
+  // the payload before express.raw reads the exact bytes Stripe signed.
+  assertStripeWebhookConfig();
+}
 
 const app = express();
+const stripeWebhookRawBody = express.raw({
+  type: 'application/json',
+  limit: '1mb',
+  inflate: false,
+});
 
 app.set('trust proxy', 1);
 app.use(helmet());
+
+// Stripe authenticates these requests cryptographically. Mount both raw-body
+// paths before the generic IP limiter so legitimate event bursts cannot receive
+// a pre-verification 429 instead of the documented webhook status contract.
+app.use('/api/webhooks', stripeWebhookRawBody, webhooksRoutes);
+app.post('/api/payments/webhook', stripeWebhookRawBody, stripeWebhookHandler);
 app.use(globalLimiter);
 
 // Ensure a JWT secret exists for tests/development if not provided
@@ -24,11 +43,6 @@ if (!process.env.JWT_SECRET) {
 }
 
 app.use(cors());
-app.use('/api/webhooks', express.raw({ type: 'application/json' }), webhooksRoutes);
-// Stripe subscription webhook needs the exact raw bytes to verify stripe-signature,
-// so this must be mounted before the global express.json() below. Scoped to this
-// one path — every other /api/payments/* route still gets normal JSON parsing.
-app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

@@ -1,6 +1,6 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
+import Stripe from 'stripe';
 import app from '../app.js';
 import { setupTestDb } from './helpers/db.setup.js';
 import prisma from '../utils/prismaClient.js';
@@ -10,6 +10,19 @@ import {
 } from '../services/paymentStateMachine.js';
 
 setupTestDb();
+
+const stripe = new Stripe('sk_test_dummy_key_for_signature_tests');
+const WEBHOOK_SECRET = 'whsec_test_secret_for_payment_idempotency';
+const originalWebhookEnv = {
+  NODE_ENV: process.env.NODE_ENV,
+  STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
+  STRIPE_WEBHOOK_TOLERANCE_SEC: process.env.STRIPE_WEBHOOK_TOLERANCE_SEC,
+};
+
+const restoreEnvValue = (key, value) => {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+};
 
 describe('Payment idempotency', () => {
   let authToken;
@@ -46,11 +59,25 @@ describe('Payment idempotency', () => {
     },
   });
 
-  const postOneTimeWebhook = (event) =>
-    request(app)
+  const postOneTimeWebhook = (event) => {
+    const payloadString = JSON.stringify(event);
+    const signature = stripe.webhooks.generateTestHeaderString({
+      payload: payloadString,
+      secret: WEBHOOK_SECRET,
+    });
+
+    return request(app)
       .post('/api/webhooks/stripe')
       .set('Content-Type', 'application/json')
-      .send(event);
+      .set('stripe-signature', signature)
+      .send(payloadString);
+  };
+
+  beforeAll(() => {
+    process.env.NODE_ENV = 'test';
+    process.env.STRIPE_WEBHOOK_SECRET = WEBHOOK_SECRET;
+    delete process.env.STRIPE_WEBHOOK_TOLERANCE_SEC;
+  });
 
   beforeEach(async () => {
     if (!process.env.JWT_SECRET) {
@@ -79,6 +106,9 @@ describe('Payment idempotency', () => {
 
   afterAll(async () => {
     await prisma.$disconnect();
+    for (const [key, value] of Object.entries(originalWebhookEnv)) {
+      restoreEnvValue(key, value);
+    }
   });
 
   test('posting same idempotencyKey twice creates a single Payment', async () => {
@@ -231,10 +261,7 @@ describe('Payment idempotency', () => {
       },
     };
 
-    const res1 = await request(app)
-      .post('/api/webhooks/stripe')
-      .set('Content-Type', 'application/json')
-      .send(eventPayload);
+    const res1 = await postOneTimeWebhook(eventPayload);
 
     expect(res1.statusCode).toBe(200);
 
@@ -247,13 +274,10 @@ describe('Payment idempotency', () => {
     expect(firstEvent.processedAt).not.toBeNull();
     expect(firstEvent.idempotencyKey).toBe(`stripe:${eventPayload.id}`);
 
-    const res2 = await request(app)
-      .post('/api/webhooks/stripe')
-      .set('Content-Type', 'application/json')
-      .send(eventPayload);
+    const res2 = await postOneTimeWebhook(eventPayload);
 
     expect(res2.statusCode).toBe(200);
-    expect(res2.text).toMatch(/duplicate|ok/i);
+    expect(res2.body).toEqual({ received: true, outcome: 'duplicate' });
 
     const paymentEvents = await prisma.paymentEvent.findMany({ where: { stripeEventId: eventPayload.id } });
     expect(paymentEvents.length).toBe(1);
@@ -669,33 +693,25 @@ describe('Payment idempotency', () => {
   }, 20000);
 
   test('returns 400 and writes nothing for an invalid signature when the webhook secret is configured', async () => {
-    const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
     const event = paymentIntentEvent({
       id: 'evt_invalid_one_time_signature',
       paymentIntentId: 'pi_invalid_one_time_signature',
       paymentId: 2147483647,
     });
-    const timestamp = Math.floor(Date.now() / 1000);
-    const invalidSignature = crypto
-      .createHmac('sha256', 'a-different-secret')
-      .update(`${timestamp}.${JSON.stringify(event)}`)
-      .digest('hex');
+    const payloadString = JSON.stringify(event);
+    const invalidSignature = stripe.webhooks.generateTestHeaderString({
+      payload: payloadString,
+      secret: 'whsec_totally_wrong_secret',
+    });
+    const response = await request(app)
+      .post('/api/webhooks/stripe')
+      .set('Content-Type', 'application/json')
+      .set('stripe-signature', invalidSignature)
+      .send(payloadString);
 
-    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_phase2b_signature';
-    try {
-      const response = await request(app)
-        .post('/api/webhooks/stripe')
-        .set('Content-Type', 'application/json')
-        .set('stripe-signature', `t=${timestamp},v1=${invalidSignature}`)
-        .send(event);
-
-      expect(response.statusCode).toBe(400);
-      await expect(
-        prisma.paymentEvent.findUnique({ where: { stripeEventId: event.id } })
-      ).resolves.toBeNull();
-    } finally {
-      if (previousSecret === undefined) delete process.env.STRIPE_WEBHOOK_SECRET;
-      else process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
-    }
+    expect(response.statusCode).toBe(400);
+    await expect(
+      prisma.paymentEvent.findUnique({ where: { stripeEventId: event.id } })
+    ).resolves.toBeNull();
   }, 20000);
 });
